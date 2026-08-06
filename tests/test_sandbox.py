@@ -5,7 +5,7 @@ Tests sandbox lifecycle management, timeout handling, and cleanup behavior.
 
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, Mock
 from datetime import datetime, timezone
 
 from src.sandbox import Sandbox, SandboxManager, INITIALIZATION_TIMEOUT, TERMINATION_TIMEOUT
@@ -159,6 +159,7 @@ class TestSandboxManager:
     async def test_create_sandbox_already_exists(self, manager):
         """Test that creating sandbox when one exists returns existing."""
         mock_sandbox = MagicMock()
+        mock_sandbox.is_healthy = AsyncMock(return_value=True)
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
         
@@ -273,13 +274,14 @@ class TestSandboxManager:
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
         
-        with patch.object(manager, 'create_sandbox') as mock_create:
-            await manager.reset_sandbox()
-            
-            # Should terminate existing sandbox
-            mock_sandbox.close.assert_called_once()
-            # Should create new sandbox
-            mock_create.assert_called_once()
+        with patch.object(manager, 'terminate_sandbox') as mock_terminate:
+            with patch.object(manager, 'create_sandbox') as mock_create:
+                await manager.reset_sandbox()
+                
+                # Should terminate existing sandbox
+                mock_terminate.assert_called_once()
+                # Should create new sandbox
+                mock_create.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_reset_sandbox_create_failure(self, manager):
@@ -288,11 +290,13 @@ class TestSandboxManager:
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
         
-        with patch.object(manager, 'create_sandbox', side_effect=Exception("Create failed")):
-            with pytest.raises(Exception) as exc_info:
-                await manager.reset_sandbox()
-            
-            assert "Create failed" in str(exc_info.value)
+        with patch.object(manager, 'terminate_sandbox') as mock_terminate:
+            with patch.object(manager, 'create_sandbox', side_effect=Exception("Create failed")):
+                with pytest.raises(Exception) as exc_info:
+                    await manager.reset_sandbox()
+                
+                assert "Create failed" in str(exc_info.value)
+                mock_terminate.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_get_sandbox_success(self, manager):
@@ -433,3 +437,256 @@ class TestSandboxTimeouts:
             # Should timeout at approximately 10 seconds (with some tolerance)
             assert 9 < elapsed < 12
             mock_force.assert_called_once()
+
+
+class TestSandboxSecurity:
+    """Security hardening tests for Sandbox and SandboxManager classes."""
+    
+    @pytest.fixture
+    def manager(self):
+        """Create a SandboxManager instance."""
+        return SandboxManager()
+    
+    @pytest.fixture
+    def mock_browser(self):
+        """Create a mock browser instance."""
+        browser = AsyncMock()
+        browser.is_connected = AsyncMock(return_value=True)
+        return browser
+    
+    @pytest.fixture
+    def mock_context(self):
+        """Create a mock browser context."""
+        context = AsyncMock()
+        context.pages = AsyncMock(return_value=[])
+        return context
+    
+    @pytest.fixture
+    def sandbox(self, mock_browser, mock_context):
+        """Create a Sandbox instance with mocked dependencies."""
+        return Sandbox(mock_browser, mock_context)
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_page_creation_synchronized(self, sandbox, mock_context):
+        """Test that concurrent page creation calls are synchronized."""
+        mock_page = AsyncMock()
+        call_count = 0
+        
+        async def delayed_new_page():
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.1)  # Simulate delay
+            return mock_page
+        
+        mock_context.new_page.side_effect = delayed_new_page
+        
+        # Create multiple concurrent page creation calls
+        tasks = [sandbox.create_page() for _ in range(5)]
+        results = await asyncio.gather(*tasks)
+        
+        # All should return the same page (last one created)
+        assert all(r == mock_page for r in results)
+        # new_page should be called multiple times but only one page exists at a time
+        assert sandbox.page == mock_page
+    
+    @pytest.mark.asyncio
+    async def test_sandbox_health_check_healthy(self, sandbox, mock_browser):
+        """Test that is_healthy returns True for healthy sandbox."""
+        mock_browser.is_connected.return_value = True
+        assert await sandbox.is_healthy() is True
+    
+    @pytest.mark.asyncio
+    async def test_sandbox_health_check_disconnected_browser(self, sandbox, mock_browser):
+        """Test that is_healthy returns False when browser is disconnected."""
+        mock_browser.is_connected.return_value = False
+        assert await sandbox.is_healthy() is False
+    
+    @pytest.mark.asyncio
+    async def test_sandbox_health_check_closed_context(self, sandbox, mock_context):
+        """Test that is_healthy returns False when context is closed."""
+        mock_context.pages.side_effect = Exception("Context closed")
+        assert await sandbox.is_healthy() is False
+    
+    @pytest.mark.asyncio
+    async def test_create_sandbox_checks_health_before_reuse(self, manager):
+        """Test that create_sandbox checks health before reusing existing sandbox."""
+        mock_sandbox = MagicMock()
+        mock_sandbox.is_healthy = AsyncMock(return_value=True)
+        manager.current_sandbox = mock_sandbox
+        manager._is_initialized = True
+        
+        result = await manager.create_sandbox()
+        
+        assert result == mock_sandbox
+        mock_sandbox.is_healthy.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_create_sandbox_recreates_unhealthy_sandbox(self, manager):
+        """Test that create_sandbox recreates sandbox if existing one is unhealthy."""
+        unhealthy_sandbox = MagicMock()
+        unhealthy_sandbox.is_healthy = AsyncMock(return_value=False)
+        manager.current_sandbox = unhealthy_sandbox
+        manager._is_initialized = True
+        
+        new_sandbox = MagicMock()
+        new_sandbox.is_healthy = AsyncMock(return_value=True)
+        
+        with patch.object(manager, '_create_sandbox_internal', return_value=new_sandbox):
+            with patch.object(manager, '_cleanup_partial_initialization') as mock_cleanup:
+                result = await manager.create_sandbox()
+                
+                assert result == new_sandbox
+                mock_cleanup.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_create_sandbox_synchronized(self, manager):
+        """Test that concurrent create_sandbox calls are synchronized."""
+        call_count = 0
+        mock_sandbox = MagicMock()
+        mock_sandbox.is_healthy = AsyncMock(return_value=True)
+        
+        async def delayed_create():
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.1)
+            return mock_sandbox
+        
+        with patch.object(manager, '_create_sandbox_internal', side_effect=delayed_create):
+            tasks = [manager.create_sandbox() for _ in range(5)]
+            results = await asyncio.gather(*tasks)
+            
+            # All should return a sandbox
+            assert all(r == mock_sandbox for r in results)
+            # _create_sandbox_internal should only be called once due to synchronization
+            assert call_count == 1
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_terminate_sandbox_synchronized(self, manager):
+        """Test that concurrent terminate_sandbox calls are synchronized."""
+        mock_sandbox = AsyncMock()
+        manager.current_sandbox = mock_sandbox
+        manager._is_initialized = True
+        
+        # Create multiple concurrent terminate calls
+        tasks = [manager.terminate_sandbox() for _ in range(5)]
+        await asyncio.gather(*tasks)
+        
+        # close should be called exactly once
+        assert mock_sandbox.close.call_count == 1
+    
+    @pytest.mark.asyncio
+    async def test_cleanup_handles_cancelled_error_during_sandbox_close(self, manager):
+        """Test that cleanup handles asyncio.CancelledError during sandbox close."""
+        mock_sandbox = AsyncMock()
+        mock_sandbox.close.side_effect = asyncio.CancelledError()
+        manager.current_sandbox = mock_sandbox
+        
+        with pytest.raises(asyncio.CancelledError):
+            await manager._cleanup_partial_initialization()
+        
+        # State should still be consistent
+        assert manager.current_sandbox is None
+        assert manager._is_initialized is False
+    
+    @pytest.mark.asyncio
+    async def test_cleanup_handles_cancelled_error_during_browser_close(self, manager):
+        """Test that cleanup handles asyncio.CancelledError during browser close."""
+        mock_browser = AsyncMock()
+        mock_browser.close.side_effect = asyncio.CancelledError()
+        manager.browser = mock_browser
+        
+        with pytest.raises(asyncio.CancelledError):
+            await manager._cleanup_partial_initialization()
+        
+        # State should still be consistent
+        assert manager.browser is None
+        assert manager._is_initialized is False
+    
+    @pytest.mark.asyncio
+    async def test_create_sandbox_handles_cancelled_error(self, manager):
+        """Test that create_sandbox handles asyncio.CancelledError gracefully."""
+        async def failing_create():
+            await asyncio.sleep(0.1)
+            raise asyncio.CancelledError()
+        
+        with patch.object(manager, '_create_sandbox_internal', side_effect=failing_create):
+            with pytest.raises(asyncio.CancelledError):
+                await manager.create_sandbox()
+        
+        # State should be consistent
+        assert manager.current_sandbox is None
+        assert manager._is_initialized is False
+    
+    @pytest.mark.asyncio
+    async def test_terminate_sandbox_handles_cancelled_error(self, manager):
+        """Test that terminate_sandbox handles asyncio.CancelledError gracefully."""
+        mock_sandbox = AsyncMock()
+        mock_sandbox.close.side_effect = asyncio.CancelledError()
+        manager.current_sandbox = mock_sandbox
+        manager._is_initialized = True
+        
+        with patch.object(manager, '_force_terminate') as mock_force:
+            with pytest.raises(asyncio.CancelledError):
+                await manager.terminate_sandbox(force=False)
+            
+            # Should still force terminate on cancellation
+            mock_force.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_downloads_disabled_in_context(self, manager):
+        """Test that downloads are disabled in browser context."""
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+        
+        manager.playwright = AsyncMock()
+        manager.playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        
+        await manager._create_sandbox_internal()
+        
+        # Verify accept_downloads=False was passed
+        mock_browser.new_context.assert_called_once()
+        call_kwargs = mock_browser.new_context.call_args[1]
+        assert call_kwargs['accept_downloads'] is False
+    
+    @pytest.mark.asyncio
+    async def test_partial_initialization_cleanup_reliable(self, manager):
+        """Test that partial initialization cleanup is reliable even with errors."""
+        # Set up partial state
+        manager.current_sandbox = AsyncMock()
+        manager.current_sandbox.close.side_effect = Exception("Close failed")
+        manager.browser = AsyncMock()
+        manager.browser.close.side_effect = Exception("Browser close failed")
+        manager.playwright = AsyncMock()
+        manager.playwright.stop.side_effect = Exception("Stop failed")
+        
+        await manager._cleanup_partial_initialization()
+        
+        # All state should be cleared despite errors
+        assert manager.current_sandbox is None
+        assert manager.browser is None
+        assert manager.playwright is None
+        assert manager._is_initialized is False
+    
+    @pytest.mark.asyncio
+    async def test_reset_sandbox_synchronized(self, manager):
+        """Test that reset_sandbox is synchronized with lifecycle operations."""
+        mock_sandbox = AsyncMock()
+        manager.current_sandbox = mock_sandbox
+        manager._is_initialized = True
+        
+        reset_called = False
+        
+        async def slow_reset():
+            nonlocal reset_called
+            reset_called = True
+            await asyncio.sleep(0.2)
+        
+        with patch.object(manager, 'terminate_sandbox', side_effect=slow_reset):
+            with patch.object(manager, 'create_sandbox') as mock_create:
+                # Try concurrent reset calls
+                tasks = [manager.reset_sandbox() for _ in range(3)]
+                await asyncio.gather(*tasks)
+                
+                # Should only complete once due to synchronization
+                assert reset_called
