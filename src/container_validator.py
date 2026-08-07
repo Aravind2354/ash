@@ -64,6 +64,15 @@ class ContainerValidator:
     containment behavior.
     """
     
+    # Approved tmpfs destinations for Phase 3A
+    APPROVED_TMPFS_DESTINATIONS = {'/tmp', '/analysis/temp'}
+    
+    # Maximum size for approved tmpfs mounts (64MB)
+    MAX_TMPFS_SIZE_MB = 64
+    
+    # Required tmpfs mount options
+    REQUIRED_TMPFS_OPTIONS = {'nosuid', 'nodev', 'noexec'}
+    
     # Dangerous capabilities that must NOT be added
     DANGEROUS_CAPABILITIES = {
         'CAP_SYS_ADMIN',
@@ -248,14 +257,20 @@ class ContainerValidator:
             )
     
     def _check_bind_mounts(self, container: Container, result: ValidationResult) -> None:
-        """Validate container has no host bind mounts or other mounts.
+        """Validate container mount configuration for Phase 3A tmpfs policy.
         
-        For Phase 2 hardened validation, reject all mount types:
+        Phase 3A allows ONLY approved tmpfs mounts:
+        - tmpfs at /tmp (max 64MB, nosuid, nodev, noexec where compatible)
+        - tmpfs at /analysis/temp (max 64MB, nosuid, nodev, noexec where compatible)
+        
+        Prohibited:
         - Host bind mounts
         - Named Docker volumes
-        - Unknown/unrecognized mount types
+        - Arbitrary tmpfs destinations
+        - Unknown mount types
+        - Source-backed mounts
         
-        Only containers with no mounts pass validation.
+        Fail closed on missing, malformed, or unverifiable mount information.
         """
         host_config = container.attrs.get('HostConfig', {})
         binds = host_config.get('Binds')
@@ -263,40 +278,213 @@ class ContainerValidator:
         # Check Docker Mounts configuration for all mount types
         mounts = container.attrs.get('Mounts', [])
         
-        # Reject any host bind mounts
-        has_bind_mounts = binds is not None and len(binds) > 0
+        # Validate each mount
+        invalid_mounts = []
+        approved_tmpfs_mounts = []
         
-        # Reject any mounts (volumes, tmpfs, etc.)
-        has_any_mounts = len(mounts) > 0
-        
-        # Categorize mount types for logging
-        mount_types = {}
         for mount in mounts:
             mount_type = mount.get('Type', 'unknown')
-            mount_types[mount_type] = mount_types.get(mount_type, 0) + 1
+            destination = mount.get('Destination', '')
+            source = mount.get('Source', None)
+            
+            # Check for host bind mounts
+            if mount_type == 'bind':
+                invalid_mounts.append({
+                    'type': 'bind',
+                    'destination': destination,
+                    'source': source,
+                    'reason': 'Host bind mounts are prohibited'
+                })
+                continue
+            
+            # Check for named volumes
+            if mount_type == 'volume':
+                invalid_mounts.append({
+                    'type': 'volume',
+                    'destination': destination,
+                    'name': mount.get('Name', 'unknown'),
+                    'reason': 'Named Docker volumes are prohibited'
+                })
+                continue
+            
+            # Check for unknown mount types
+            if mount_type not in ('tmpfs',):
+                invalid_mounts.append({
+                    'type': mount_type,
+                    'destination': destination,
+                    'reason': f'Unknown mount type: {mount_type}'
+                })
+                continue
+            
+            # Validate tmpfs mounts
+            if mount_type == 'tmpfs':
+                # Check destination is approved
+                if destination not in self.APPROVED_TMPFS_DESTINATIONS:
+                    invalid_mounts.append({
+                        'type': 'tmpfs',
+                        'destination': destination,
+                        'reason': f'Tmpfs destination not approved: {destination}'
+                    })
+                    continue
+                
+                # Check no source path (tmpfs should not have source)
+                if source is not None:
+                    invalid_mounts.append({
+                        'type': 'tmpfs',
+                        'destination': destination,
+                        'source': source,
+                        'reason': 'Tmpfs should not have source path'
+                    })
+                    continue
+                
+                # Get tmpfs options from host config
+                tmpfs_opts = host_config.get('Tmpfs', {})
+                destination_opts = tmpfs_opts.get(destination, '')
+                
+                # Parse size limit (e.g., "size=64m" or "size=64M")
+                size_valid = False
+                size_mb = 0
+                if destination_opts:
+                    opts_parts = destination_opts.split(',')
+                    for part in opts_parts:
+                        part = part.strip().lower()
+                        # Handle "size=64m" format
+                        if part.startswith('size='):
+                            size_part = part[5:]  # Remove "size=" prefix
+                            if size_part.endswith('m'):
+                                size_str = size_part[:-1]  # Remove 'm' suffix
+                                if size_str.isdigit():
+                                    size_mb = int(size_str)
+                                    size_valid = size_mb <= self.MAX_TMPFS_SIZE_MB
+                                    break
+                
+                if not size_valid:
+                    invalid_mounts.append({
+                        'type': 'tmpfs',
+                        'destination': destination,
+                        'size_mb': size_mb,
+                        'reason': f'Tmpfs size exceeds {self.MAX_TMPFS_SIZE_MB}MB or invalid'
+                    })
+                    continue
+                
+                # Check required options
+                opts_lower = destination_opts.lower() if destination_opts else ''
+                has_required = all(opt in opts_lower for opt in self.REQUIRED_TMPFS_OPTIONS)
+                
+                if not has_required:
+                    invalid_mounts.append({
+                        'type': 'tmpfs',
+                        'destination': destination,
+                        'options': destination_opts,
+                        'reason': f'Missing required options: {self.REQUIRED_TMPFS_OPTIONS}'
+                    })
+                    continue
+                
+                # If all checks pass, it's an approved tmpfs
+                approved_tmpfs_mounts.append({
+                    'destination': destination,
+                    'size_mb': size_mb,
+                    'options': destination_opts
+                })
+        
+        # ALSO validate tmpfs from HostConfig['Tmpfs'] directly
+        # Docker tmpfs mounts may not appear in Mounts array on some platforms (e.g., Windows/WSL2)
+        tmpfs_opts = host_config.get('Tmpfs', {})
+        for destination, options in tmpfs_opts.items():
+            # Skip if already validated from Mounts array
+            if any(m['destination'] == destination for m in approved_tmpfs_mounts):
+                continue
+            if any(m['destination'] == destination for m in invalid_mounts):
+                continue
+            
+            # Check destination is approved
+            if destination not in self.APPROVED_TMPFS_DESTINATIONS:
+                invalid_mounts.append({
+                    'type': 'tmpfs',
+                    'destination': destination,
+                    'reason': f'Tmpfs destination not approved: {destination}'
+                })
+                continue
+            
+            # Parse size limit
+            size_valid = False
+            size_mb = 0
+            if options:
+                opts_parts = options.split(',')
+                for part in opts_parts:
+                    part = part.strip().lower()
+                    if part.startswith('size='):
+                        size_part = part[5:]
+                        if size_part.endswith('m'):
+                            size_str = size_part[:-1]
+                            if size_str.isdigit():
+                                size_mb = int(size_str)
+                                size_valid = size_mb <= self.MAX_TMPFS_SIZE_MB
+                                break
+            
+            if not size_valid:
+                invalid_mounts.append({
+                    'type': 'tmpfs',
+                    'destination': destination,
+                    'size_mb': size_mb,
+                    'reason': f'Tmpfs size exceeds {self.MAX_TMPFS_SIZE_MB}MB or invalid'
+                })
+                continue
+            
+            # Check required options
+            opts_lower = options.lower() if options else ''
+            has_required = all(opt in opts_lower for opt in self.REQUIRED_TMPFS_OPTIONS)
+            
+            if not has_required:
+                invalid_mounts.append({
+                    'type': 'tmpfs',
+                    'destination': destination,
+                    'options': options,
+                    'reason': f'Missing required options: {self.REQUIRED_TMPFS_OPTIONS}'
+                })
+                continue
+            
+            # If all checks pass, it's an approved tmpfs
+            approved_tmpfs_mounts.append({
+                'destination': destination,
+                'size_mb': size_mb,
+                'options': options
+            })
+        
+        # Also check legacy Binds format
+        if binds is not None and len(binds) > 0:
+            for bind in binds:
+                invalid_mounts.append({
+                    'type': 'bind',
+                    'bind': bind,
+                    'reason': 'Legacy bind mounts format is prohibited'
+                })
+        
+        # Validation passes if no invalid mounts and at least some approved tmpfs
+        # (or no mounts at all is also acceptable for backward compatibility)
+        has_invalid_mounts = len(invalid_mounts) > 0
         
         check = SecurityCheck(
             property_name="bind_mounts",
-            passed=not has_bind_mounts and not has_any_mounts,
+            passed=not has_invalid_mounts,
             observed_value={
-                'binds': binds if has_bind_mounts else "none",
-                'mounts': mount_types if has_any_mounts else "none",
+                'invalid_mounts': invalid_mounts if has_invalid_mounts else "none",
+                'approved_tmpfs_mounts': approved_tmpfs_mounts if approved_tmpfs_mounts else "none",
                 'total_mounts': len(mounts)
             },
-            expected_condition="No mounts allowed (bind mounts, volumes, tmpfs, etc.)"
+            expected_condition="Only approved tmpfs mounts at /tmp and /analysis/temp (max 64MB, nosuid, nodev, noexec)"
         )
         result.add_check(check)
         
         if not check.passed:
             self.logger.error(
-                f"Container {result.container_id} validation failed: mounts detected",
+                f"Container {result.container_id} validation failed: invalid mounts detected",
                 extra={
                     "extra_fields": {
                         "container_id": result.container_id,
                         "property": "bind_mounts",
-                        "binds": binds,
-                        "mounts": mount_types,
-                        "total_mounts": len(mounts)
+                        "invalid_mounts": invalid_mounts,
+                        "approved_tmpfs_mounts": approved_tmpfs_mounts
                     }
                 }
             )

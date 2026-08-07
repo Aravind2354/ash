@@ -122,6 +122,155 @@ class TestDockerIntegration:
             except NotFound:
                 pass
     
+    def test_approved_tmpfs_configuration(self, docker_client, validator):
+        """Test container with approved tmpfs configuration passes validation."""
+        container = docker_client.containers.run(
+            "python:3.11-slim",
+            "sleep 30",
+            detach=True,
+            remove=False,
+            # Security settings
+            privileged=False,
+            read_only=True,
+            network_mode="none",
+            ipc_mode="private",
+            pids_limit=100,
+            mem_limit="512m",
+            cpu_quota=50000,
+            cpu_period=100000,
+            security_opt=["no-new-privileges"],
+            cap_drop=["ALL"],
+            user="1000",
+            # Phase 3A approved tmpfs mounts
+            tmpfs={
+                '/tmp': 'size=64m,noexec,nosuid,nodev',
+                '/analysis/temp': 'size=64m,noexec,nosuid,nodev'
+            }
+        )
+        
+        try:
+            result = validator.validate_container(container)
+            
+            # Log validation results
+            print("\n=== Approved Tmpfs Configuration ===")
+            print(f"Valid: {result.valid}")
+            print(f"Checks performed: {len(result.checks)}")
+            print(f"Violations: {len(result.violations)}")
+            if result.violations:
+                for violation in result.violations:
+                    print(f"  - {violation.property_name}: {violation.observed_value}")
+            print("=====================================\n")
+            
+            # Container with approved tmpfs should pass validation
+            assert result.valid is True, f"Approved tmpfs container failed validation: {result.violations}"
+            assert len(result.violations) == 0
+            
+            # Check that tmpfs mounts are recognized as approved
+            bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+            assert bind_check.passed is True
+            
+            # Verify actual Docker attrs structure
+            print("\n=== Actual Docker Tmpfs Configuration ===")
+            host_config = container.attrs.get('HostConfig', {})
+            tmpfs_config = host_config.get('Tmpfs', {})
+            mounts = container.attrs.get('Mounts', [])
+            print(f"Tmpfs config: {tmpfs_config}")
+            print(f"Mounts: {mounts}")
+            print("======================================\n")
+            
+        finally:
+            try:
+                container.stop()
+                container.remove()
+            except NotFound:
+                pass
+    
+    def test_invalid_tmpfs_size_fails(self, docker_client, validator):
+        """Test container with tmpfs size exceeding 64MB fails validation."""
+        container = docker_client.containers.run(
+            "python:3.11-slim",
+            "sleep 30",
+            detach=True,
+            remove=False,
+            # Security settings
+            privileged=False,
+            read_only=True,
+            network_mode="none",
+            ipc_mode="private",
+            pids_limit=100,
+            mem_limit="512m",
+            cpu_quota=50000,
+            cpu_period=100000,
+            security_opt=["no-new-privileges"],
+            cap_drop=["ALL"],
+            user="1000",
+            # Invalid tmpfs size (exceeds 64MB)
+            tmpfs={
+                '/tmp': 'size=128m,nosuid,nodev,noexec'
+            }
+        )
+        
+        try:
+            result = validator.validate_container(container)
+            
+            # Container with oversized tmpfs should fail validation
+            assert result.valid is False
+            
+            bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+            assert bind_check.passed is False
+            # Check that the failure is related to tmpfs size
+            assert len(bind_check.observed_value['invalid_mounts']) > 0
+            
+        finally:
+            try:
+                container.stop()
+                container.remove()
+            except NotFound:
+                pass
+    
+    def test_arbitrary_tmpfs_destination_fails(self, docker_client, validator):
+        """Test container with tmpfs at non-approved destination fails validation."""
+        container = docker_client.containers.run(
+            "python:3.11-slim",
+            "sleep 30",
+            detach=True,
+            remove=False,
+            # Security settings
+            privileged=False,
+            read_only=True,
+            network_mode="none",
+            ipc_mode="private",
+            pids_limit=100,
+            mem_limit="512m",
+            cpu_quota=50000,
+            cpu_period=100000,
+            security_opt=["no-new-privileges"],
+            cap_drop=["ALL"],
+            user="1000",
+            # Invalid tmpfs destination
+            tmpfs={
+                '/var/tmp': 'size=64m,nosuid,nodev,noexec'
+            }
+        )
+        
+        try:
+            result = validator.validate_container(container)
+            
+            # Container with arbitrary tmpfs destination should fail validation
+            assert result.valid is False
+            
+            bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+            assert bind_check.passed is False
+            # Check that the failure is related to tmpfs destination
+            assert len(bind_check.observed_value['invalid_mounts']) > 0
+            
+        finally:
+            try:
+                container.stop()
+                container.remove()
+            except NotFound:
+                pass
+    
     def test_privileged_container_fails(self, docker_client, validator):
         """Test that privileged container fails validation."""
         container = docker_client.containers.run(

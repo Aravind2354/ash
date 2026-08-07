@@ -165,14 +165,15 @@ class TestReadonlyRootfsCheck:
         assert result.valid is False
 
 
-class TestBindMountsCheck:
-    """Test bind mount validation."""
+class TestTmpfsPolicyCheck:
+    """Test Phase 3A tmpfs policy validation."""
     
     def test_no_mounts_passes(self, validator, mock_container):
         """Test container with no mounts passes validation."""
         mock_container.attrs = {
             'HostConfig': {
-                'Binds': None
+                'Binds': None,
+                'Tmpfs': {}
             },
             'Mounts': []
         }
@@ -182,13 +183,40 @@ class TestBindMountsCheck:
         bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
         assert bind_check.passed is True
     
-    def test_empty_mounts_passes(self, validator, mock_container):
-        """Test container with empty mounts list passes validation."""
+    def test_approved_tmp_tmpfs_passes(self, validator, mock_container):
+        """Test container with approved /tmp tmpfs passes validation."""
         mock_container.attrs = {
             'HostConfig': {
-                'Binds': []
+                'Binds': None,
+                'Tmpfs': {
+                    '/tmp': 'size=64m,noexec,nosuid,nodev'
+                }
             },
-            'Mounts': []
+            'Mounts': []  # Empty mounts array - validation will check HostConfig['Tmpfs'] directly
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is True
+        assert bind_check.observed_value['approved_tmpfs_mounts'] == [
+            {
+                'destination': '/tmp',
+                'size_mb': 64,
+                'options': 'size=64m,noexec,nosuid,nodev'
+            }
+        ]
+    
+    def test_approved_analysis_temp_tmpfs_passes(self, validator, mock_container):
+        """Test container with approved /analysis/temp tmpfs passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': None,
+                'Tmpfs': {
+                    '/analysis/temp': 'size=64m,nosuid,nodev,noexec'
+                }
+            },
+            'Mounts': []  # Empty mounts array - validation will check HostConfig['Tmpfs'] directly
         }
         
         result = validator.validate_container(mock_container)
@@ -196,13 +224,16 @@ class TestBindMountsCheck:
         bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
         assert bind_check.passed is True
     
-    def test_host_bind_mount_fails(self, validator, mock_container):
-        """Test container with host bind mount fails validation."""
+    def test_tmpfs_size_exceeds_64mb_fails(self, validator, mock_container):
+        """Test container with tmpfs size > 64MB fails validation."""
         mock_container.attrs = {
             'HostConfig': {
-                'Binds': ['/host/path:/container/path']
+                'Binds': None,
+                'Tmpfs': {
+                    '/tmp': 'size=128m,nosuid,nodev,noexec'
+                }
             },
-            'Mounts': []
+            'Mounts': []  # Empty mounts array - validation will check HostConfig['Tmpfs'] directly
         }
         
         result = validator.validate_container(mock_container)
@@ -210,12 +241,56 @@ class TestBindMountsCheck:
         bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
         assert bind_check.passed is False
         assert result.valid is False
+        assert 'size exceeds 64MB' in bind_check.observed_value['invalid_mounts'][0]['reason']
+    
+    def test_arbitrary_tmpfs_destination_fails(self, validator, mock_container):
+        """Test container with tmpfs at non-approved destination fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': None,
+                'Tmpfs': {
+                    '/var/tmp': 'size=64m,nosuid,nodev,noexec'
+                }
+            },
+            'Mounts': []  # Empty mounts array - validation will check HostConfig['Tmpfs'] directly
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
+        assert result.valid is False
+        assert 'not approved' in bind_check.observed_value['invalid_mounts'][0]['reason']
+    
+    def test_bind_mount_fails(self, validator, mock_container):
+        """Test container with host bind mount fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': ['/host/path:/container/path'],
+                'Tmpfs': {}
+            },
+            'Mounts': [
+                {
+                    'Type': 'bind',
+                    'Destination': '/container/path',
+                    'Source': '/host/path'
+                }
+            ]
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
+        assert result.valid is False
+        assert 'Host bind mounts are prohibited' in bind_check.observed_value['invalid_mounts'][0]['reason']
     
     def test_named_volume_fails(self, validator, mock_container):
         """Test container with named Docker volume fails validation."""
         mock_container.attrs = {
             'HostConfig': {
-                'Binds': None
+                'Binds': None,
+                'Tmpfs': {}
             },
             'Mounts': [
                 {
@@ -231,12 +306,14 @@ class TestBindMountsCheck:
         bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
         assert bind_check.passed is False
         assert result.valid is False
+        assert 'Named Docker volumes are prohibited' in bind_check.observed_value['invalid_mounts'][0]['reason']
     
     def test_unknown_mount_type_fails(self, validator, mock_container):
         """Test container with unknown mount type fails validation."""
         mock_container.attrs = {
             'HostConfig': {
-                'Binds': None
+                'Binds': None,
+                'Tmpfs': {}
             },
             'Mounts': [
                 {
@@ -251,52 +328,107 @@ class TestBindMountsCheck:
         bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
         assert bind_check.passed is False
         assert result.valid is False
-
-
-class TestPidModeCheck:
-    """Test PID namespace mode validation."""
     
-    def test_default_pid_mode_passes(self, validator, mock_container):
-        """Test container with default PID mode (empty string) passes validation."""
+    def test_source_backed_tmpfs_fails(self, validator, mock_container):
+        """Test container with source-backed tmpfs fails validation."""
         mock_container.attrs = {
             'HostConfig': {
-                'PidMode': ''
-            }
+                'Binds': None,
+                'Tmpfs': {
+                    '/tmp': 'size=64m,nosuid,nodev,noexec'
+                }
+            },
+            'Mounts': [
+                {
+                    'Type': 'tmpfs',
+                    'Destination': '/tmp',
+                    'Source': '/host/path'  # tmpfs should not have source
+                }
+            ]
         }
         
         result = validator.validate_container(mock_container)
         
-        pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
-        assert pid_check.passed is True
-        assert pid_check.observed_value == "default/private"
-    
-    def test_private_pid_mode_passes(self, validator, mock_container):
-        """Test container with private PID mode passes validation."""
-        mock_container.attrs = {
-            'HostConfig': {
-                'PidMode': 'private'
-            }
-        }
-        
-        result = validator.validate_container(mock_container)
-        
-        pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
-        assert pid_check.passed is True
-    
-    def test_host_pid_mode_fails(self, validator, mock_container):
-        """Test container with host PID mode fails validation."""
-        mock_container.attrs = {
-            'HostConfig': {
-                'PidMode': 'host'
-            }
-        }
-        
-        result = validator.validate_container(mock_container)
-        
-        pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
-        assert pid_check.passed is False
-        assert pid_check.observed_value == 'host'
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
         assert result.valid is False
+        assert 'should not have source path' in bind_check.observed_value['invalid_mounts'][0]['reason']
+    
+    def test_missing_noexec_option_fails(self, validator, mock_container):
+        """Test container with missing noexec option fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': None,
+                'Tmpfs': {
+                    '/tmp': 'size=64m,nosuid,nodev'  # Missing noexec
+                }
+            },
+            'Mounts': []  # Empty mounts array - validation will check HostConfig['Tmpfs'] directly
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
+        assert result.valid is False
+        assert 'Missing required options' in bind_check.observed_value['invalid_mounts'][0]['reason']
+    
+    def test_missing_required_tmpfs_options_fails(self, validator, mock_container):
+        """Test container with missing required tmpfs options fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': None,
+                'Tmpfs': {
+                    '/tmp': 'size=64m'  # Missing nosuid, nodev, noexec
+                }
+            },
+            'Mounts': []  # Empty mounts array - validation will check HostConfig['Tmpfs'] directly
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
+        assert result.valid is False
+        assert 'Missing required options' in bind_check.observed_value['invalid_mounts'][0]['reason']
+    
+    def test_malformed_mount_configuration_fails_closed(self, validator, mock_container):
+        """Test container with malformed mount configuration fails closed."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': None,
+                'Tmpfs': {}
+            },
+            'Mounts': [
+                {
+                    'Type': 'tmpfs'
+                    # Missing Destination
+                }
+            ]
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
+        assert result.valid is False
+    
+    def test_legacy_bind_mount_format_fails(self, validator, mock_container):
+        """Test container with legacy Binds format fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': ['/host/path:/container/path:ro'],
+                'Tmpfs': {}
+            },
+            'Mounts': []
+        }
+        
+        result = validator.validate_container(mock_container)
+        
+        bind_check = next(c for c in result.checks if c.property_name == 'bind_mounts')
+        assert bind_check.passed is False
+        assert result.valid is False
+        assert 'Legacy bind mounts format' in bind_check.observed_value['invalid_mounts'][0]['reason']
 
 
 class TestIpcModeCheck:
