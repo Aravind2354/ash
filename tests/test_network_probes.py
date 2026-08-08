@@ -478,3 +478,51 @@ class TestNetworkModeVerification:
                     assert 'namespace_evidence' in result.observed_value['evidence']
                     assert 'interface_evidence' in result.observed_value['evidence']
                     assert 'routing_evidence' in result.observed_value['evidence']
+
+    def test_run_all_probes_succeeds(self, network_probes):
+        """Test that run_all_probes succeeds."""
+        with patch.object(network_probes, 'probe_network_namespace_evidence') as mock_ns:
+            with patch.object(network_probes, 'probe_network_interface_evidence') as mock_iface:
+                with patch.object(network_probes, 'probe_routing_table_evidence') as mock_route:
+                    with patch.object(network_probes, 'probe_dns_configuration_evidence') as mock_dns:
+                        with patch.object(network_probes, 'probe_networkmode_verification') as mock_mode:
+                            # Mock all probes to succeed
+                            mock_ns.return_value = ProbeResult(
+                                probe_name='network_namespace_evidence',
+                                passed=True,
+                                observed_value={'same_namespace': True},
+                                expected_condition='test'
+                            )
+                            mock_iface.return_value = ProbeResult(
+                                probe_name='network_interface_evidence',
+                                passed=True,
+                                observed_value={'interface_count': 1},
+                                expected_condition='test'
+                            )
+                            mock_route.return_value = ProbeResult(
+                                probe_name='routing_table_evidence',
+                                passed=True,
+                                observed_value={'route_count': 1},
+                                expected_condition='test'
+                            )
+                            mock_dns.return_value = ProbeResult(
+                                probe_name='dns_configuration_evidence',
+                                passed=True,
+                                observed_value={'dns_servers': ['8.8.8.8']},
+                                expected_condition='test'
+                            )
+                            mock_mode.return_value = ProbeResult(
+                                probe_name='networkmode_verification',
+                                passed=True,
+                                observed_value={'inferred_mode': 'none_or_loopback_only'},
+                                expected_condition='test'
+                            )
+
+                            results = network_probes.run_all_probes()
+
+                            assert len(results) == 5
+                            assert 'network_namespace_evidence' in results
+                            assert 'network_interface_evidence' in results
+                            assert 'routing_table_evidence' in results
+                            assert 'dns_configuration_evidence' in results
+                            assert 'networkmode_verification' in results

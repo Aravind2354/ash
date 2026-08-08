@@ -435,3 +435,69 @@ class NetworkProbes:
                 expected_condition='Network mode verification should succeed',
                 error=f'Unexpected error during network mode verification: {e}'
             )
+
+    def run_all_probes(self) -> Dict[str, ProbeResult]:
+        """Run all network probes and return results.
+
+        Returns:
+            Dictionary mapping probe names to ProbeResult objects.
+        """
+        results = {}
+
+        try:
+            # Run all probes
+            results['network_namespace_evidence'] = self.probe_network_namespace_evidence()
+        except Exception as e:
+            results['network_namespace_evidence'] = ProbeResult(
+                probe_name='network_namespace_evidence',
+                passed=False,
+                observed_value=f'unexpected_error: {type(e).__name__}',
+                expected_condition='Probe should execute without errors',
+                error=f'Unexpected error during probe: {e}'
+            )
+
+        try:
+            results['network_interface_evidence'] = self.probe_network_interface_evidence()
+        except Exception as e:
+            results['network_interface_evidence'] = ProbeResult(
+                probe_name='network_interface_evidence',
+                passed=False,
+                observed_value=f'unexpected_error: {type(e).__name__}',
+                expected_condition='Probe should execute without errors',
+                error=f'Unexpected error during probe: {e}'
+            )
+
+        try:
+            results['routing_table_evidence'] = self.probe_routing_table_evidence()
+        except Exception as e:
+            results['routing_table_evidence'] = ProbeResult(
+                probe_name='routing_table_evidence',
+                passed=False,
+                observed_value=f'unexpected_error: {type(e).__name__}',
+                expected_condition='Probe should execute without errors',
+                error=f'Unexpected error during probe: {e}'
+            )
+
+        try:
+            results['dns_configuration_evidence'] = self.probe_dns_configuration_evidence()
+        except Exception as e:
+            results['dns_configuration_evidence'] = ProbeResult(
+                probe_name='dns_configuration_evidence',
+                passed=False,
+                observed_value=f'unexpected_error: {type(e).__name__}',
+                expected_condition='Probe should execute without errors',
+                error=f'Unexpected error during probe: {e}'
+            )
+
+        try:
+            results['networkmode_verification'] = self.probe_networkmode_verification()
+        except Exception as e:
+            results['networkmode_verification'] = ProbeResult(
+                probe_name='networkmode_verification',
+                passed=False,
+                observed_value=f'unexpected_error: {type(e).__name__}',
+                expected_condition='Probe should execute without errors',
+                error=f'Unexpected error during probe: {e}'
+            )
+
+        return results
