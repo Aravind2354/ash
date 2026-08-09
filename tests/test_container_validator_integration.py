@@ -93,7 +93,7 @@ class TestDockerIntegration:
             # Security settings
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -138,7 +138,7 @@ class TestDockerIntegration:
             # Security settings
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -201,7 +201,7 @@ class TestDockerIntegration:
             # Security settings
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -244,7 +244,7 @@ class TestDockerIntegration:
             # Security settings
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -472,7 +472,7 @@ class TestProcessProbesIntegration:
             # Default PID namespace (no pid_mode specified)
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -492,7 +492,8 @@ class TestProcessProbesIntegration:
             pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
             assert pid_check.passed is True
             # Docker Desktop reports empty string for default/private PID namespace
-            assert pid_check.observed_value in ("default/private", "")
+            # Validator normalizes empty string to "default"
+            assert pid_check.observed_value in ("default", "default/private", "")
             
             print("\n=== Default PID Namespace ===")
             print(f"PidMode observed: {pid_check.observed_value}")
@@ -515,7 +516,7 @@ class TestProcessProbesIntegration:
             pid_mode="host",
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -552,7 +553,7 @@ class TestProcessProbesIntegration:
             remove=False,
             privileged=False,
             read_only=True,
-            network_mode="none",
+            network_mode="bridge",
             ipc_mode="private",
             pids_limit=100,
             mem_limit="512m",
@@ -659,22 +660,22 @@ class TestDockerDesktopSpecificBehavior:
             detach=True,
             remove=False
         )
-        
+
         try:
             host_config = container.attrs.get('HostConfig', {})
             network_mode = host_config.get('NetworkMode', '')
-            
+
             print(f"\n=== Docker Desktop Network Mode ===")
             print(f"Observed NetworkMode value: {repr(network_mode)}")
             print(f"Type: {type(network_mode)}")
             print(f"===================================\n")
-            
+
             # Validate our understanding
             result = validator.validate_container(container)
             network_check = next(c for c in result.checks if c.property_name == 'network_mode')
-            
-            # Default network mode (bridge) should fail in Phase 2 (requires none)
-            assert network_check.passed is False
+
+            # Default network mode (bridge) should pass in Phase 3D (requires bridge for external access)
+            assert network_check.passed is True
             
         finally:
             try:
@@ -732,7 +733,7 @@ print(json.dumps(result.to_dict()))
             remove=False,
             # Security restrictions
             privileged=False,
-            network_mode="none",
+            network_mode="bridge",
             pids_limit=100,
             user="1000",
             # Mount source code
@@ -790,7 +791,7 @@ print(json.dumps(result.to_dict()))
             detach=True,
             remove=False,
             privileged=False,
-            network_mode="none",
+            network_mode="bridge",
             pids_limit=100,
             user="1000",
             volumes={cwd: {'bind': '/app', 'mode': 'ro'}}
@@ -846,7 +847,7 @@ print(json.dumps(result.to_dict()))
             detach=True,
             remove=False,
             privileged=False,
-            network_mode="none",
+            network_mode="bridge",
             pids_limit=100,
             user="1000",
             volumes={cwd: {'bind': '/app', 'mode': 'ro'}}
@@ -902,7 +903,7 @@ print(json.dumps(result.to_dict()))
             detach=True,
             remove=False,
             privileged=False,
-            network_mode="none",
+            network_mode="bridge",
             pids_limit=100,
             user="1000",
             volumes={cwd: {'bind': '/app', 'mode': 'ro'}}
@@ -958,7 +959,7 @@ print(json.dumps({k: v.to_dict() for k, v in results.items()}))
             detach=True,
             remove=False,
             privileged=False,
-            network_mode="none",
+            network_mode="bridge",
             pids_limit=100,
             user="1000",
             volumes={cwd: {'bind': '/app', 'mode': 'ro'}}
@@ -996,7 +997,7 @@ print(json.dumps({k: v.to_dict() for k, v in results.items()}))
             detach=True,
             remove=False,
             privileged=False,
-            network_mode="none",
+            network_mode="bridge",
             pids_limit=100,
             user="1000"
         )

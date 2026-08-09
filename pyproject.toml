@@ -53,6 +53,9 @@ addopts = [
     "--tb=short",
 ]
 asyncio_mode = "auto"
+markers = [
+    "playwright: marks tests that require Playwright (deselect with '-m \"not playwright\"')"
+]
 
 [tool.black]
 line-length = 100

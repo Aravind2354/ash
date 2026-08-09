@@ -42,7 +42,7 @@ class TestIsolationOrchestratorIntegration:
             'python:3.11-slim',
             command='tail -f /dev/null',
             user='nobody',  # Non-root user
-            network_mode='none',  # No networking
+            network_mode='bridge',  # Bridge networking for controlled external access
             mem_limit='128m',  # Memory limit
             pids_limit=100,  # PID limit
             detach=True
@@ -60,7 +60,7 @@ class TestIsolationOrchestratorIntegration:
         container = docker_client.containers.create(
             'python:3.11-slim',
             command='tail -f /dev/null',
-            network_mode='none',  # No networking
+            network_mode='bridge',  # Bridge networking (but missing other security)
             detach=True
         )
         container.start()

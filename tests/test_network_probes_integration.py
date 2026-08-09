@@ -34,18 +34,18 @@ class TestNetworkProbesIntegration:
     
     @pytest.fixture
     def isolated_container(self, docker_client):
-        """Create a container with isolated network (--network=none)."""
+        """Create a container with bridge networking for controlled external access."""
         container = docker_client.containers.create(
             'python:3.11-slim',
             command='tail -f /dev/null',  # Keep container running
-            network_mode='none',
+            network_mode='bridge',
             tmpfs={'/tmp': 'rw,noexec,nosuid,nodev'},  # Allow writes to /tmp only
             detach=True
         )
         container.start()
-        
+
         yield container
-        
+
         # Cleanup
         container.remove(force=True)
     

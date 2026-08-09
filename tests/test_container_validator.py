@@ -479,16 +479,16 @@ class TestIpcModeCheck:
 class TestNetworkModeCheck:
     """Test network namespace mode validation."""
     
-    def test_none_network_mode_passes(self, validator, mock_container):
-        """Test container with network=none passes validation (Phase 2 requirement)."""
+    def test_bridge_network_mode_passes(self, validator, mock_container):
+        """Test container with network=bridge passes validation (Phase 3D requirement)."""
         mock_container.attrs = {
             'HostConfig': {
-                'NetworkMode': 'none'
+                'NetworkMode': 'bridge'
             }
         }
-        
+
         result = validator.validate_container(mock_container)
-        
+
         network_check = next(c for c in result.checks if c.property_name == 'network_mode')
         assert network_check.passed is True
     
@@ -507,15 +507,20 @@ class TestNetworkModeCheck:
         assert network_check.observed_value == 'host'
         assert result.valid is False
     
-    def test_bridge_network_mode_fails_phase2(self, validator, mock_container):
-        """Test container with bridge network mode fails in Phase 2 (requires none)."""
+    def test_none_network_mode_fails(self, validator, mock_container):
+        """Test container with network=none fails in Phase 3D (requires bridge for external access)."""
         mock_container.attrs = {
             'HostConfig': {
-                'NetworkMode': 'bridge'
+                'NetworkMode': 'none'
             }
         }
-        
+
         result = validator.validate_container(mock_container)
+
+        network_check = next(c for c in result.checks if c.property_name == 'network_mode')
+        assert network_check.passed is False
+        assert network_check.observed_value == 'none'
+        assert result.valid is False
         
         network_check = next(c for c in result.checks if c.property_name == 'network_mode')
         assert network_check.passed is False
@@ -890,10 +895,12 @@ class TestValidHardenedConfiguration:
             'HostConfig': {
                 'Privileged': False,
                 'ReadonlyRootfs': True,
-                'Binds': None,
+                'Binds': [],
+                'Volumes': {},
+                'Tmpfs': {},
                 'PidMode': '',
                 'IpcMode': 'private',
-                'NetworkMode': 'none',
+                'NetworkMode': 'bridge',
                 'CapAdd': [],
                 'CapDrop': ['ALL'],
                 'SecurityOpt': ['no-new-privileges'],
@@ -907,12 +914,12 @@ class TestValidHardenedConfiguration:
             },
             'Mounts': []
         }
-        
+
         result = validator.validate_container(mock_container)
-        
+
         assert result.valid is True
         assert len(result.violations) == 0
-        assert len(result.checks) == 12  # All security checks performed
+        assert len(result.checks) == 16  # All security checks performed (original 12 + 4 new checks)
 
 
 class TestMalformedConfiguration:
@@ -933,25 +940,30 @@ class TestMalformedConfiguration:
             'HostConfig': {
                 'Privileged': False,
                 'ReadonlyRootfs': True,
-                'Binds': None,
+                'Binds': [],
+                'Volumes': {},
+                'Tmpfs': {},
                 'PidMode': '',
                 'IpcMode': 'private',
-                'NetworkMode': 'none',
+                'NetworkMode': 'bridge',
                 'CapAdd': [],
-                'CapDrop': ['CAP_NET_RAW'],
+                'CapDrop': ['CAP_NET_RAW'],  # Invalid - missing ALL
                 'SecurityOpt': ['no-new-privileges'],
                 'Memory': 536870912,
                 'PidsLimit': 100,
                 'CpuQuota': 50000
+            },
+            'Config': {
+                'User': '1000'  # Add valid user to isolate the capability failure
             }
         }
-        
+
         result = validator.validate_container(mock_container)
-        
+
         assert result.valid is False
-        # User check should fail
-        user_check = next(c for c in result.checks if c.property_name == 'user')
-        assert user_check.passed is False
+        # Capabilities check should fail
+        caps_check = next(c for c in result.checks if c.property_name == 'capabilities')
+        assert caps_check.passed is False
 
 
 class TestValidationErrorHandling:
@@ -983,3 +995,271 @@ class TestValidationErrorHandling:
             assert mock_log_error.called
             log_calls = [str(call) for call in mock_log_error.call_args_list]
             assert any('privileged' in str(call) for call in log_calls)
+
+
+class TestDockerSocketProtection:
+    """Test Docker socket access protection."""
+
+    def test_docker_socket_bind_fails(self, validator, mock_container):
+        """Test container with Docker socket bind mount fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': ['/var/run/docker.sock:/var/run/docker.sock']
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        docker_socket_check = next(c for c in result.checks if c.property_name == 'docker_socket_access')
+        assert docker_socket_check.passed is False
+        assert result.valid is False
+
+    def test_docker_socket_volume_fails(self, validator, mock_container):
+        """Test container with Docker socket volume mount fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Volumes': {'/var/run/docker.sock': {}}
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        docker_socket_check = next(c for c in result.checks if c.property_name == 'docker_socket_access')
+        assert docker_socket_check.passed is False
+        assert result.valid is False
+
+    def test_no_docker_socket_passes(self, validator, mock_container):
+        """Test container without Docker socket access passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': [],
+                'Volumes': {}
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        docker_socket_check = next(c for c in result.checks if c.property_name == 'docker_socket_access')
+        assert docker_socket_check.passed is True
+
+
+class TestHostFilesystemProtection:
+    """Test host filesystem mount protection."""
+
+    def test_root_mount_fails(self, validator, mock_container):
+        """Test container with root filesystem mount fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': ['/:/host']
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        host_mount_check = next(c for c in result.checks if c.property_name == 'host_filesystem_mounts')
+        assert host_mount_check.passed is False
+        assert result.valid is False
+
+    def test_etc_mount_fails(self, validator, mock_container):
+        """Test container with /etc mount fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': ['/etc:/etc']
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        host_mount_check = next(c for c in result.checks if c.property_name == 'host_filesystem_mounts')
+        assert host_mount_check.passed is False
+        assert result.valid is False
+
+    def test_var_mount_fails(self, validator, mock_container):
+        """Test container with /var mount fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': ['/var:/var']
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        host_mount_check = next(c for c in result.checks if c.property_name == 'host_filesystem_mounts')
+        assert host_mount_check.passed is False
+        assert result.valid is False
+
+    def test_no_host_mounts_passes(self, validator, mock_container):
+        """Test container without host filesystem mounts passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Binds': []
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        host_mount_check = next(c for c in result.checks if c.property_name == 'host_filesystem_mounts')
+        assert host_mount_check.passed is True
+
+
+class TestPidModeValidation:
+    """Test PID namespace validation."""
+
+    def test_host_pid_fails(self, validator, mock_container):
+        """Test container with host PID mode fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'PidMode': 'host'
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
+        assert pid_check.passed is False
+        assert result.valid is False
+
+    def test_private_pid_passes(self, validator, mock_container):
+        """Test container with private PID mode passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'PidMode': 'private'
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
+        assert pid_check.passed is True
+
+    def test_default_pid_passes(self, validator, mock_container):
+        """Test container with default PID mode passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'PidMode': ''
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        pid_check = next(c for c in result.checks if c.property_name == 'pid_mode')
+        assert pid_check.passed is True
+
+
+class TestIpcModeValidation:
+    """Test IPC namespace validation."""
+
+    def test_host_ipc_fails(self, validator, mock_container):
+        """Test container with host IPC mode fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'IpcMode': 'host'
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        ipc_check = next(c for c in result.checks if c.property_name == 'ipc_mode')
+        assert ipc_check.passed is False
+        assert result.valid is False
+
+    def test_private_ipc_passes(self, validator, mock_container):
+        """Test container with private IPC mode passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'IpcMode': 'private'
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        ipc_check = next(c for c in result.checks if c.property_name == 'ipc_mode')
+        assert ipc_check.passed is True
+
+    def test_default_ipc_passes(self, validator, mock_container):
+        """Test container with default IPC mode passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'IpcMode': ''
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        ipc_check = next(c for c in result.checks if c.property_name == 'ipc_mode')
+        assert ipc_check.passed is True
+
+
+class TestTmpfsRestrictions:
+    """Test tmpfs mount restrictions."""
+
+    def test_tmp_tmpfs_passes(self, validator, mock_container):
+        """Test container with /tmp tmpfs passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Tmpfs': {'/tmp': 'rw,noexec,nosuid,nodev'}
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        tmpfs_check = next(c for c in result.checks if c.property_name == 'tmpfs_restrictions')
+        assert tmpfs_check.passed is True
+
+    def test_var_tmpfs_fails(self, validator, mock_container):
+        """Test container with /var tmpfs fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Tmpfs': {'/var': 'rw'}
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        tmpfs_check = next(c for c in result.checks if c.property_name == 'tmpfs_restrictions')
+        assert tmpfs_check.passed is False
+        assert result.valid is False
+
+    def test_no_tmpfs_passes(self, validator, mock_container):
+        """Test container without tmpfs passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Tmpfs': {}
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        tmpfs_check = next(c for c in result.checks if c.property_name == 'tmpfs_restrictions')
+        assert tmpfs_check.passed is True
+
+
+class TestPrivilegedModeValidation:
+    """Test privileged mode validation."""
+
+    def test_privileged_true_fails(self, validator, mock_container):
+        """Test container with privileged=True fails validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Privileged': True
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        privileged_check = next(c for c in result.checks if c.property_name == 'privileged')
+        assert privileged_check.passed is False
+        assert result.valid is False
+
+    def test_privileged_false_passes(self, validator, mock_container):
+        """Test container with privileged=False passes validation."""
+        mock_container.attrs = {
+            'HostConfig': {
+                'Privileged': False
+            }
+        }
+
+        result = validator.validate_container(mock_container)
+
+        privileged_check = next(c for c in result.checks if c.property_name == 'privileged')
+        assert privileged_check.passed is True

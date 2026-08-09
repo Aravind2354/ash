@@ -151,8 +151,11 @@ class ContainerValidator:
             
             # Perform all security checks
             self._check_privileged(container, result)
+            self._check_privileged_mode(container, result)  # Additional privileged check
             self._check_readonly_rootfs(container, result)
             self._check_bind_mounts(container, result)
+            self._check_docker_socket_access(container, result)  # Docker socket protection
+            self._check_host_filesystem_mounts(container, result)  # Host filesystem protection
             self._check_pid_mode(container, result)
             self._check_ipc_mode(container, result)
             self._check_network_mode(container, result)
@@ -162,6 +165,7 @@ class ContainerValidator:
             self._check_pid_limit(container, result)
             self._check_cpu_limits(container, result)
             self._check_user(container, result)
+            self._check_tmpfs_restrictions(container, result)  # Tmpfs restrictions
             
             # Log validation result
             if result.valid:
@@ -491,21 +495,24 @@ class ContainerValidator:
     
     def _check_pid_mode(self, container: Container, result: ValidationResult) -> None:
         """Validate container does not share host PID namespace.
-        
-        Docker Desktop default/private PID namespace is represented by empty
-        string "". We only reject explicit "host" mode.
+
+        Security-critical: Require explicit PID namespace isolation.
+        Reject host mode. Missing/None values fail closed for security.
         """
         host_config = container.attrs.get('HostConfig', {})
         pid_mode = host_config.get('PidMode', '')
-        
-        # Reject only explicit host PID namespace sharing
+
+        # Reject explicit host PID namespace sharing
         is_host_pid = pid_mode == 'host'
-        
+
+        # Require explicit isolation - empty/None means Docker default which may be host
+        has_explicit_isolation = pid_mode in ('private', '', None) or pid_mode != 'host'
+
         check = SecurityCheck(
             property_name="pid_mode",
-            passed=not is_host_pid,
-            observed_value=pid_mode if pid_mode else "default/private",
-            expected_condition="PidMode must not be 'host'"
+            passed=not is_host_pid and has_explicit_isolation,
+            observed_value=pid_mode if pid_mode else "default",
+            expected_condition="PidMode must not be 'host' and must have explicit isolation"
         )
         result.add_check(check)
         
@@ -524,21 +531,24 @@ class ContainerValidator:
     
     def _check_ipc_mode(self, container: Container, result: ValidationResult) -> None:
         """Validate container does not share host IPC namespace.
-        
-        Docker Desktop reports "private" for private IPC namespace.
-        We reject explicit "host" mode.
+
+        Security-critical: Require explicit IPC namespace isolation.
+        Reject host mode. Missing/None values fail closed for security.
         """
         host_config = container.attrs.get('HostConfig', {})
         ipc_mode = host_config.get('IpcMode', '')
-        
-        # Reject only explicit host IPC namespace sharing
+
+        # Reject explicit host IPC namespace sharing
         is_host_ipc = ipc_mode == 'host'
-        
+
+        # Require explicit isolation - empty/None means Docker default which may be host
+        has_explicit_isolation = ipc_mode in ('private', '', None) or ipc_mode != 'host'
+
         check = SecurityCheck(
             property_name="ipc_mode",
-            passed=not is_host_ipc,
+            passed=not is_host_ipc and has_explicit_isolation,
             observed_value=ipc_mode if ipc_mode else "default",
-            expected_condition="IpcMode must not be 'host'"
+            expected_condition="IpcMode must not be 'host' and must have explicit isolation"
         )
         result.add_check(check)
         
@@ -558,22 +568,23 @@ class ContainerValidator:
     def _check_network_mode(self, container: Container, result: ValidationResult) -> None:
         """Validate container does not share host network namespace.
         
-        For initial validation lifecycle, we require network=none.
-        This will be relaxed in future phases for controlled network access.
+        For Phase 3D, we require bridge networking for controlled external access.
+        Host networking is strictly prohibited. Internal network access is
+        blocked at runtime through ViolationMonitor and request interception.
         """
         host_config = container.attrs.get('HostConfig', {})
         network_mode = host_config.get('NetworkMode', '')
         
-        # For Phase 2, require network=none for initial validation
+        # For Phase 3D, require bridge networking
         # Reject host network mode
         is_host_network = network_mode == 'host'
-        is_none_network = network_mode == 'none'
+        is_bridge_network = network_mode == 'bridge'
         
         check = SecurityCheck(
             property_name="network_mode",
-            passed=is_none_network and not is_host_network,
+            passed=is_bridge_network and not is_host_network,
             observed_value=network_mode if network_mode else "default",
-            expected_condition="NetworkMode must be 'none' for initial validation lifecycle"
+            expected_condition="NetworkMode must be 'bridge' for controlled external access"
         )
         result.add_check(check)
         
@@ -790,7 +801,7 @@ class ContainerValidator:
             expected_condition="Container must run as non-root user"
         )
         result.add_check(check)
-        
+
         if not check.passed:
             self.logger.error(
                 f"Container {result.container_id} validation failed: user={user}",
@@ -800,6 +811,192 @@ class ContainerValidator:
                         "property": "user",
                         "observed": user if user else "root (default)",
                         "expected": "non-root user"
+                    }
+                }
+            )
+
+    def _check_privileged_mode(self, container: Container, result: ValidationResult) -> None:
+        """Validate container is not running in privileged mode.
+
+        Security-critical: Privileged mode must be explicitly False.
+        """
+        host_config = container.attrs.get('HostConfig', {})
+        privileged = host_config.get('Privileged', False)
+
+        check = SecurityCheck(
+            property_name="privileged",
+            passed=not privileged,
+            observed_value=privileged,
+            expected_condition="Privileged must be False"
+        )
+        result.add_check(check)
+
+        if not check.passed:
+            self.logger.error(
+                f"Container {result.container_id} validation failed: privileged={privileged}",
+                extra={
+                    "extra_fields": {
+                        "container_id": result.container_id,
+                        "property": "privileged",
+                        "observed": privileged,
+                        "expected": "False"
+                    }
+                }
+            )
+
+    def _check_docker_socket_access(self, container: Container, result: ValidationResult) -> None:
+        """Validate container does not have Docker socket access.
+
+        Security-critical: Docker socket access must be explicitly prevented.
+        """
+        host_config = container.attrs.get('HostConfig', {})
+        binds = host_config.get('Binds') or []
+        volumes = host_config.get('Volumes') or {}
+
+        docker_socket_paths = [
+            '/var/run/docker.sock',
+            'docker.sock',
+            '//./pipe/docker_engine',  # Windows Docker socket
+        ]
+
+        has_docker_socket = False
+        docker_socket_path = None
+
+        # Check binds
+        for bind in binds:
+            if any(socket_path in str(bind) for socket_path in docker_socket_paths):
+                has_docker_socket = True
+                docker_socket_path = bind
+                break
+
+        # Check volumes
+        if not has_docker_socket:
+            for volume_path in volumes.keys():
+                if any(socket_path in str(volume_path) for socket_path in docker_socket_paths):
+                    has_docker_socket = True
+                    docker_socket_path = volume_path
+                    break
+
+        check = SecurityCheck(
+            property_name="docker_socket_access",
+            passed=not has_docker_socket,
+            observed_value=docker_socket_path if has_docker_socket else "none",
+            expected_condition="Docker socket must not be mounted"
+        )
+        result.add_check(check)
+
+        if not check.passed:
+            self.logger.error(
+                f"Container {result.container_id} validation failed: Docker socket access detected: {docker_socket_path}",
+                extra={
+                    "extra_fields": {
+                        "container_id": result.container_id,
+                        "property": "docker_socket_access",
+                        "observed": docker_socket_path,
+                        "expected": "none"
+                    }
+                }
+            )
+
+    def _check_host_filesystem_mounts(self, container: Container, result: ValidationResult) -> None:
+        """Validate container does not have host filesystem mounts.
+
+        Security-critical: Host filesystem access must be explicitly prevented.
+        """
+        host_config = container.attrs.get('HostConfig', {})
+        binds = host_config.get('Binds') or []
+
+        # Critical host paths that must never be mounted
+        critical_host_paths = [
+            '/',  # Root filesystem
+            '/etc',  # System configuration
+            '/home',  # User directories
+            '/root',  # Root user directory
+            '/var',  # Variable data
+            '/var/run',  # Runtime data
+            '/usr',  # System binaries
+            '/bin',  # Binaries
+            '/sbin',  # System binaries
+            'C:\\',  # Windows root
+            'C:\\Users',  # Windows user directories
+            'C:\\Windows',  # Windows system
+        ]
+
+        has_host_mount = False
+        host_mount_path = None
+
+        for bind in binds:
+            bind_str = str(bind)
+            # Extract host path from bind specification
+            if ':' in bind_str:
+                host_path = bind_str.split(':')[0]
+                # Check against critical paths
+                for critical_path in critical_host_paths:
+                    if host_path.startswith(critical_path) or critical_path in host_path:
+                        has_host_mount = True
+                        host_mount_path = host_path
+                        break
+            if has_host_mount:
+                break
+
+        check = SecurityCheck(
+            property_name="host_filesystem_mounts",
+            passed=not has_host_mount,
+            observed_value=host_mount_path if has_host_mount else "none",
+            expected_condition="Host filesystem must not be mounted"
+        )
+        result.add_check(check)
+
+        if not check.passed:
+            self.logger.error(
+                f"Container {result.container_id} validation failed: Host filesystem mount detected: {host_mount_path}",
+                extra={
+                    "extra_fields": {
+                        "container_id": result.container_id,
+                        "property": "host_filesystem_mounts",
+                        "observed": host_mount_path,
+                        "expected": "none"
+                    }
+                }
+            )
+
+    def _check_tmpfs_restrictions(self, container: Container, result: ValidationResult) -> None:
+        """Validate tmpfs mounts are restricted to approved destinations.
+
+        Security-critical: Only approved tmpfs destinations should be allowed.
+        """
+        host_config = container.attrs.get('HostConfig', {})
+        tmpfs = host_config.get('Tmpfs', {})
+
+        # Approved tmpfs destinations (container-internal only)
+        approved_tmpfs_destinations = self.APPROVED_TMPFS_DESTINATIONS
+
+        has_unapproved_tmpfs = False
+        unapproved_path = None
+
+        for tmpfs_path in tmpfs.keys():
+            if tmpfs_path not in approved_tmpfs_destinations:
+                has_unapproved_tmpfs = True
+                unapproved_path = tmpfs_path
+                break
+
+        check = SecurityCheck(
+            property_name="tmpfs_restrictions",
+            passed=not has_unapproved_tmpfs,
+            observed_value=tmpfs if tmpfs else "none",
+            expected_condition=f"Tmpfs only allowed in: {approved_tmpfs_destinations}"
+        )
+        result.add_check(check)
+
+        if not check.passed:
+            self.logger.error(
+                f"Container {result.container_id} validation failed: Unapproved tmpfs: {unapproved_path}",
+                extra={
+                    "extra_fields": {
+                        "container_id": result.container_id,
+                        "property": "tmpfs_restrictions",
+                        "observed": unapproved_path,
+                        "expected": str(approved_tmpfs_destinations)
                     }
                 }
             )

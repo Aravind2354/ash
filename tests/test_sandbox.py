@@ -5,6 +5,7 @@ Tests sandbox lifecycle management, timeout handling, and cleanup behavior.
 
 import pytest
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch, Mock
 from datetime import datetime, timezone
 
@@ -29,12 +30,14 @@ class TestSandbox:
     @pytest.fixture
     def sandbox(self, mock_browser, mock_context):
         """Create a Sandbox instance with mocked dependencies."""
-        return Sandbox(mock_browser, mock_context)
-    
+        mock_manager = Mock()
+        return Sandbox(mock_browser, mock_context, mock_manager, None)
+
     @pytest.mark.asyncio
     async def test_sandbox_creation(self, mock_browser, mock_context):
         """Test creating a Sandbox instance."""
-        sandbox = Sandbox(mock_browser, mock_context)
+        mock_manager = Mock()
+        sandbox = Sandbox(mock_browser, mock_context, mock_manager, None)
         
         assert sandbox.browser == mock_browser
         assert sandbox.context == mock_context
@@ -100,6 +103,99 @@ class TestSandbox:
         mock_context.close.assert_called_once()
         assert sandbox.page is None
 
+    @pytest.mark.asyncio
+    async def test_create_page_timeout(self, sandbox, mock_context):
+        """Test that create_page times out and fails closed."""
+        # Make new_page hang indefinitely
+        async def hanging_new_page():
+            await asyncio.sleep(1000)  # Would hang, but timeout will catch it
+            return AsyncMock()
+
+        mock_context.new_page.side_effect = hanging_new_page
+
+        # Patch INITIALIZATION_TIMEOUT to be very short for testing
+        with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.1):
+            with pytest.raises(RuntimeError) as exc_info:
+                await sandbox.create_page()
+
+            assert "timed out" in str(exc_info.value).lower()
+            assert "fail-closed" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_create_page_timeout_performs_cleanup(self, sandbox, mock_context):
+        """Test that create_page timeout performs cleanup."""
+        # Make new_page hang indefinitely
+        async def hanging_new_page():
+            await asyncio.sleep(1000)
+            return AsyncMock()
+
+        mock_context.new_page.side_effect = hanging_new_page
+
+        # Patch INITIALIZATION_TIMEOUT to be very short for testing
+        with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.1):
+            with pytest.raises(RuntimeError):
+                await sandbox.create_page()
+
+            # Verify cleanup was attempted
+            mock_context.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_page_exception_performs_cleanup(self, sandbox, mock_context):
+        """Test that create_page exception performs cleanup."""
+        mock_context.new_page.side_effect = Exception("Browser crashed")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sandbox.create_page()
+
+        assert "failed" in str(exc_info.value).lower()
+        assert "fail-closed" in str(exc_info.value).lower()
+
+        # Verify cleanup was attempted
+        mock_context.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_page_timeout_prevents_load_url_continuation(self, sandbox, mock_context):
+        """Test that create_page timeout prevents load_url from continuing."""
+        # Make new_page hang indefinitely
+        async def hanging_new_page():
+            await asyncio.sleep(1000)
+            return AsyncMock()
+
+        mock_context.new_page.side_effect = hanging_new_page
+
+        # Patch INITIALIZATION_TIMEOUT to be very short for testing
+        with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.1):
+            with pytest.raises(RuntimeError):
+                await sandbox.create_page()
+
+        # Verify page was not set (cleanup occurred)
+        assert sandbox.page is None
+
+    @pytest.mark.asyncio
+    async def test_create_page_timeout_no_deadlock(self, sandbox, mock_context):
+        """Test that create_page timeout cannot deadlock during cleanup."""
+        # Make new_page hang indefinitely
+        async def hanging_new_page():
+            await asyncio.sleep(1000)
+            return AsyncMock()
+
+        mock_context.new_page.side_effect = hanging_new_page
+
+        # Patch INITIALIZATION_TIMEOUT to be very short for testing
+        with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.1):
+            # This should complete without deadlock
+            start_time = datetime.now(timezone.utc)
+            with pytest.raises(RuntimeError):
+                await sandbox.create_page()
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+            # Should complete quickly (within timeout + overhead), not hang indefinitely
+            assert elapsed < 1.0, f"Cleanup should be bounded, but took {elapsed}s"
+
+            # Verify cleanup was performed despite being called from within lock
+            mock_context.close.assert_called_once()
+            assert sandbox.page is None
+
 
 class TestSandboxManager:
     """Tests for SandboxManager class."""
@@ -122,38 +218,43 @@ class TestSandboxManager:
         """Test successful sandbox creation within timeout."""
         # Create a mock sandbox to return from _create_sandbox_internal
         mock_sandbox = MagicMock()
+        mock_sandbox.is_healthy = Mock(return_value=True)
         
         with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox):
-            sandbox = await manager.create_sandbox()
-            
-            assert sandbox == mock_sandbox
-            assert manager._is_initialized is True
-            assert manager.current_sandbox == sandbox
+            with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                sandbox = await manager.create_sandbox()
+
+                assert sandbox == mock_sandbox
+                assert manager._is_initialized is True
+                assert manager.current_sandbox == sandbox
     
     @pytest.mark.asyncio
     async def test_create_sandbox_timeout(self, manager):
         """Test sandbox creation timeout after 15 seconds."""
         async def slow_create():
-            await asyncio.sleep(20)  # Exceeds 15s timeout
+            await asyncio.sleep(0.1)  # Speed up test
             return MagicMock()
         
-        with patch.object(manager, '_create_sandbox_internal', side_effect=slow_create):
-            with pytest.raises(TimeoutError) as exc_info:
-                await manager.create_sandbox()
-            
-            assert "exceeded 15" in str(exc_info.value)  # Check for 15 seconds
-            assert "timeout" in str(exc_info.value).lower()
-            assert manager._is_initialized is False
+        # Patch the timeout to be very short for testing
+        with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.05):
+            with patch.object(manager, '_create_sandbox_internal', side_effect=slow_create):
+                with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                    with pytest.raises(TimeoutError) as exc_info:
+                        await manager.create_sandbox()
+
+                    assert "timeout" in str(exc_info.value).lower()
+                    assert manager._is_initialized is False
     
     @pytest.mark.asyncio
     async def test_create_sandbox_exception(self, manager):
         """Test sandbox creation exception handling."""
         with patch.object(manager, '_create_sandbox_internal', side_effect=Exception("Browser launch failed")):
-            with pytest.raises(Exception) as exc_info:
-                await manager.create_sandbox()
-            
-            assert "Browser launch failed" in str(exc_info.value)
-            assert manager._is_initialized is False
+            with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                with pytest.raises(Exception) as exc_info:
+                    await manager.create_sandbox()
+
+                assert "Browser launch failed" in str(exc_info.value)
+                assert manager._is_initialized is False
     
     @pytest.mark.asyncio
     async def test_create_sandbox_already_exists(self, manager):
@@ -162,10 +263,11 @@ class TestSandboxManager:
         mock_sandbox.is_healthy = AsyncMock(return_value=True)
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
-        
-        result = await manager.create_sandbox()
-        
-        assert result == mock_sandbox
+
+        with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+            result = await manager.create_sandbox()
+
+            assert result == mock_sandbox
     
     @pytest.mark.asyncio
     async def test_terminate_sandbox_graceful(self, manager):
@@ -207,18 +309,20 @@ class TestSandboxManager:
     async def test_terminate_sandbox_timeout_forces(self, manager):
         """Test that graceful termination timeout triggers forced termination."""
         async def slow_close():
-            await asyncio.sleep(15)  # Exceeds 10s timeout
+            await asyncio.sleep(0.1)  # Speed up test
         
         mock_sandbox = AsyncMock()
         mock_sandbox.close.side_effect = slow_close
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
         
-        with patch.object(manager, '_force_terminate') as mock_force:
-            await manager.terminate_sandbox(force=False)
-            
-            # Should have attempted graceful close first
-            mock_sandbox.close.assert_called_once()
+        # Patch the timeout to be very short for testing
+        with patch('src.sandbox.TERMINATION_TIMEOUT', 0.05):
+            with patch.object(manager, '_force_terminate') as mock_force:
+                await manager.terminate_sandbox(force=False)
+
+                # Should have attempted graceful close first
+                mock_sandbox.close.assert_called_once()
             # Then forced termination
             mock_force.assert_called_once()
     
@@ -266,6 +370,119 @@ class TestSandboxManager:
         assert manager.browser is None
         assert manager.playwright is None
         assert manager._is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_playwright_init_timeout(self, manager):
+        """Test that Playwright initialization timeout fails closed."""
+        # Mock async_playwright to hang during start
+        async def hanging_start():
+            await asyncio.sleep(1000)  # Would hang, but timeout will catch it
+            return AsyncMock()
+
+        with patch('src.sandbox.async_playwright') as mock_async_playwright:
+            mock_async_playwright.return_value.start.side_effect = hanging_start
+            with patch('src.sandbox.PLAYWRIGHT_INIT_TIMEOUT', 0.1):
+                with pytest.raises(RuntimeError) as exc_info:
+                    await manager._create_sandbox_internal()
+
+                assert "timed out" in str(exc_info.value).lower()
+                assert "fail-closed" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_playwright_init_exception(self, manager):
+        """Test that Playwright initialization exception fails closed."""
+        with patch('src.sandbox.async_playwright') as mock_async_playwright:
+            mock_async_playwright.return_value.start.side_effect = Exception("Playwright crash")
+            with pytest.raises(RuntimeError) as exc_info:
+                await manager._create_sandbox_internal()
+
+            assert "failed" in str(exc_info.value).lower()
+            assert "fail-closed" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_isolation_validation_no_deadlock(self, manager):
+        """Test that isolation validation failure does not cause deadlock."""
+        # Create a mock sandbox that will be validated
+        mock_sandbox = AsyncMock()
+        mock_sandbox.is_healthy = Mock(return_value=True)
+
+        with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox):
+            with patch.object(manager, 'validate_isolation', return_value=(False, "Test failure")):
+                with pytest.raises(RuntimeError) as exc_info:
+                    await manager.create_sandbox()
+
+                assert "validation failed" in str(exc_info.value).lower()
+                assert "terminated" in str(exc_info.value).lower()
+
+                # Verify cleanup was called (no deadlock)
+                assert manager.current_sandbox is None
+                assert manager._is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_isolation_validation_cleanup(self, manager):
+        """Test that isolation validation failure performs cleanup."""
+        mock_sandbox = AsyncMock()
+        mock_sandbox.is_healthy = Mock(return_value=True)
+
+        with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox):
+            with patch.object(manager, 'validate_isolation', return_value=(False, "Test failure")):
+                with pytest.raises(RuntimeError):
+                    await manager.create_sandbox()
+
+                # Verify sandbox was closed
+                mock_sandbox.close.assert_called_once()
+                assert manager.current_sandbox is None
+                assert manager._is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_isolation_validation_lifecycle_lock_released(self, manager):
+        """Test that lifecycle lock is released after isolation validation failure."""
+        mock_sandbox = AsyncMock()
+        mock_sandbox.is_healthy = Mock(return_value=True)
+
+        with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox):
+            with patch.object(manager, 'validate_isolation', return_value=(False, "Test failure")):
+                with pytest.raises(RuntimeError):
+                    await manager.create_sandbox()
+
+                # Lock should be released - we should be able to call another lifecycle operation
+                # This would deadlock if the lock was still held
+                mock_sandbox2 = AsyncMock()
+                mock_sandbox2.is_healthy = Mock(return_value=True)
+                with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox2):
+                    with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                        # This should succeed if lock was released
+                        result = await manager.create_sandbox()
+                        assert result == mock_sandbox2
+
+    @pytest.mark.asyncio
+    async def test_isolation_validation_no_website_loading(self, manager):
+        """Test that website loading cannot proceed after isolation validation failure."""
+        mock_sandbox = AsyncMock()
+        mock_sandbox.is_healthy = Mock(return_value=True)
+
+        with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox):
+            with patch.object(manager, 'validate_isolation', return_value=(False, "Test failure")):
+                with pytest.raises(RuntimeError):
+                    await manager.create_sandbox()
+
+                # Try to get sandbox - should fail since it was cleaned up
+                with pytest.raises(RuntimeError):
+                    await manager.get_sandbox()
+
+    @pytest.mark.asyncio
+    async def test_initialization_succeeds_with_valid_isolation(self, manager):
+        """Test that initialization succeeds when isolation is valid."""
+        mock_sandbox = AsyncMock()
+        mock_sandbox.is_healthy = Mock(return_value=True)
+
+        with patch.object(manager, '_create_sandbox_internal', return_value=mock_sandbox):
+            with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                result = await manager.create_sandbox()
+
+                assert result == mock_sandbox
+                assert manager._is_initialized is True
+                assert manager.current_sandbox == mock_sandbox
     
     @pytest.mark.asyncio
     async def test_reset_sandbox(self, manager):
@@ -400,43 +617,48 @@ class TestSandboxTimeouts:
     
     @pytest.mark.asyncio
     async def test_create_sandbox_respects_timeout(self):
-        """Test that create_sandbox enforces 15-second timeout."""
+        """Test that create_sandbox enforces timeout."""
         manager = SandboxManager()
         
         async def slow_internal():
-            await asyncio.sleep(20)
+            await asyncio.sleep(0.1)
             return MagicMock()
         
-        with patch.object(manager, '_create_sandbox_internal', side_effect=slow_internal):
-            start = datetime.now(timezone.utc)
-            with pytest.raises(TimeoutError):
-                await manager.create_sandbox()
-            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
-            
-            # Should timeout at approximately 15 seconds (with some tolerance)
-            assert 14 < elapsed < 17
+        # Patch the timeout to be very short for testing
+        with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.05):
+            with patch.object(manager, '_create_sandbox_internal', side_effect=slow_internal):
+                with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                    start = datetime.now(timezone.utc)
+                    with pytest.raises(TimeoutError):
+                        await manager.create_sandbox()
+                    elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+
+                    # Should timeout at approximately the patched timeout
+                    assert 0.04 < elapsed < 0.2
     
     @pytest.mark.asyncio
     async def test_terminate_sandbox_respects_timeout(self):
-        """Test that terminate_sandbox enforces 10-second timeout for graceful shutdown."""
+        """Test that terminate_sandbox enforces timeout for graceful shutdown."""
         manager = SandboxManager()
         mock_sandbox = AsyncMock()
         
         async def slow_close():
-            await asyncio.sleep(15)
+            await asyncio.sleep(0.1)
         
         mock_sandbox.close.side_effect = slow_close
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
         
-        with patch.object(manager, '_force_terminate') as mock_force:
-            start = datetime.now(timezone.utc)
-            await manager.terminate_sandbox(force=False)
-            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
-            
-            # Should timeout at approximately 10 seconds (with some tolerance)
-            assert 9 < elapsed < 12
-            mock_force.assert_called_once()
+        # Patch the timeout to be very short for testing
+        with patch('src.sandbox.TERMINATION_TIMEOUT', 0.05):
+            with patch.object(manager, '_force_terminate') as mock_force:
+                start = datetime.now(timezone.utc)
+                await manager.terminate_sandbox(force=False)
+                elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+
+                # Should timeout at approximately the patched timeout
+                assert 0.04 < elapsed < 0.2
+                mock_force.assert_called_once()
 
 
 class TestSandboxSecurity:
@@ -464,8 +686,9 @@ class TestSandboxSecurity:
     @pytest.fixture
     def sandbox(self, mock_browser, mock_context):
         """Create a Sandbox instance with mocked dependencies."""
-        return Sandbox(mock_browser, mock_context)
-    
+        mock_manager = Mock()
+        return Sandbox(mock_browser, mock_context, mock_manager, None)
+
     @pytest.mark.asyncio
     async def test_concurrent_page_creation_synchronized(self, sandbox, mock_context):
         """Test that concurrent page creation calls are synchronized."""
@@ -514,11 +737,12 @@ class TestSandboxSecurity:
         mock_sandbox.is_healthy = AsyncMock(return_value=True)
         manager.current_sandbox = mock_sandbox
         manager._is_initialized = True
-        
-        result = await manager.create_sandbox()
-        
-        assert result == mock_sandbox
-        mock_sandbox.is_healthy.assert_called_once()
+
+        with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+            result = await manager.create_sandbox()
+
+            assert result == mock_sandbox
+            mock_sandbox.is_healthy.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_create_sandbox_recreates_unhealthy_sandbox(self, manager):
@@ -530,13 +754,14 @@ class TestSandboxSecurity:
         
         new_sandbox = MagicMock()
         new_sandbox.is_healthy = AsyncMock(return_value=True)
-        
+
         with patch.object(manager, '_create_sandbox_internal', return_value=new_sandbox):
             with patch.object(manager, '_cleanup_partial_initialization') as mock_cleanup:
-                result = await manager.create_sandbox()
-                
-                assert result == new_sandbox
-                mock_cleanup.assert_called_once()
+                with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                    result = await manager.create_sandbox()
+
+                    assert result == new_sandbox
+                    mock_cleanup.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_concurrent_create_sandbox_synchronized(self, manager):
@@ -552,9 +777,10 @@ class TestSandboxSecurity:
             return mock_sandbox
         
         with patch.object(manager, '_create_sandbox_internal', side_effect=delayed_create):
-            tasks = [manager.create_sandbox() for _ in range(5)]
-            results = await asyncio.gather(*tasks)
-            
+            with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                tasks = [manager.create_sandbox() for _ in range(5)]
+                results = await asyncio.gather(*tasks)
+
             # All should return a sandbox
             assert all(r == mock_sandbox for r in results)
             # _create_sandbox_internal should only be called once due to synchronization
@@ -610,12 +836,13 @@ class TestSandboxSecurity:
             raise asyncio.CancelledError()
         
         with patch.object(manager, '_create_sandbox_internal', side_effect=failing_create):
-            with pytest.raises(asyncio.CancelledError):
-                await manager.create_sandbox()
-        
-        # State should be consistent
-        assert manager.current_sandbox is None
-        assert manager._is_initialized is False
+            with patch.object(manager, 'validate_isolation', return_value=(True, "")):
+                with pytest.raises(asyncio.CancelledError):
+                    await manager.create_sandbox()
+
+                # State should be consistent
+                assert manager.current_sandbox is None
+                assert manager._is_initialized is False
     
     @pytest.mark.asyncio
     async def test_terminate_sandbox_handles_cancelled_error(self, manager):
