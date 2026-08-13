@@ -1,0 +1,85 @@
+# Git metadata
+.git
+.gitignore
+.gitattributes
+
+# Python virtual environments
+venv/
+.venv/
+virtualenv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing cache (but not the test files themselves)
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+logs/
+*.log
+
+# Datasets and model artifacts
+datasets/
+models/
+*.pkl
+*.joblib
+*.model
+
+# IDE metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+secrets/
+*.pem
+*.key
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Note: scripts/ are included for test orchestration
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Kiro specs
+.kiro/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+Thumbs.db
+.DS_Store

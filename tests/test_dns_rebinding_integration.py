@@ -7,13 +7,14 @@ Tests the actual browser behavior with DNS rebinding protection for:
 - Redirects and subresources (should be checked)
 """
 
+import os
+import sys
 import pytest
+import pytest_asyncio
 import asyncio
 from playwright.async_api import async_playwright
 
 # Add src to path for imports
-import sys
-import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.sandbox import SandboxManager
@@ -24,11 +25,27 @@ from src.violation_monitor import ViolationMonitor
 class TestDNSRebindingIntegration:
     """Integration tests for DNS rebinding protection with real browser."""
 
-    @pytest.fixture
-    async def sandbox_manager(self):
-        """Create a SandboxManager instance for testing."""
+    @pytest_asyncio.fixture
+    async def sandbox_manager(self, sandbox_container_id):
+        """Create a SandboxManager instance for testing.
+
+        IMPORTANT: This fixture uses the SANDBOX_CONTAINER_ID environment variable
+        as a test-infrastructure trust handoff from the host-side validation.
+
+        This trust handoff exists only to connect the host-side validation result
+        to the test process. It is not a production security mechanism.
+
+        The host validates the actual Docker container configuration before setting
+        this environment variable and running the tests.
+        """
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
+
+        # Read container ID from fixture (set by host-side test orchestration)
+        if sandbox_container_id:
+            # Mark sandbox as validated using host-attested container ID
+            manager.set_isolation_validated(sandbox_container_id)
+
         yield manager
         await manager.cleanup()
 
@@ -158,12 +175,13 @@ class TestRedirectHandling:
     """Test redirect handling with DNS rebinding protection."""
 
     @pytest.fixture
-    async def sandbox_manager(self):
+    def sandbox_manager(self, sandbox_container_id):
         """Create a SandboxManager instance for testing."""
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
+        if sandbox_container_id:
+            manager.set_isolation_validated(sandbox_container_id)
         yield manager
-        await manager.cleanup()
 
     @pytest.mark.asyncio
     async def test_redirect_to_public_allowed(self, sandbox_manager):
@@ -197,12 +215,13 @@ class TestIPv6Handling:
     """Test IPv6 address handling with DNS rebinding protection."""
 
     @pytest.fixture
-    async def sandbox_manager(self):
+    def sandbox_manager(self, sandbox_container_id):
         """Create a SandboxManager instance for testing."""
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
+        if sandbox_container_id:
+            manager.set_isolation_validated(sandbox_container_id)
         yield manager
-        await manager.cleanup()
 
     @pytest.mark.asyncio
     async def test_ipv6_loopback_blocked(self, sandbox_manager):

@@ -31,6 +31,7 @@ import asyncio
 import logging
 import inspect
 import socket
+import os
 from typing import Optional, Tuple
 from datetime import datetime, timezone
 
@@ -71,12 +72,12 @@ class Sandbox:
         self.logger = get_logger(__name__)
         self._created_at = datetime.now(timezone.utc)
         self._page_lock = asyncio.Lock()  # Synchronize page creation
-    
+
     async def create_page(self) -> Page:
         """Create a new page in the isolated context.
-        
+
         Thread-safe: Uses lock to prevent concurrent page creation races.
-        
+
         Returns:
             New Playwright Page instance
 
@@ -118,21 +119,21 @@ class Sandbox:
                     f"Page creation failed: {e}. "
                     f"Sandbox terminated per fail-closed behavior."
                 )
-    
+
     async def close_page(self) -> None:
         """Close the current page if it exists."""
         if self.page is not None:
             await self.page.close()
             self.page = None
             self.logger.info("Closed page in sandbox context")
-    
+
     async def close(self) -> None:
         """Close the browser context."""
         await self.close_page()
         if self.context:
             await self.context.close()
             self.logger.info("Closed sandbox context")
-    
+
     async def load_url(self, url: str, timeout: int = 30) -> bool:
         """Load a URL in the isolated browser context.
 
@@ -338,7 +339,7 @@ class Sandbox:
         # Browser-level network security and container-level isolation provide
         # the primary protection against internal network access.
         if self.violation_monitor:
-            def handle_request(route, request):
+            async def handle_request(route, request):
                 """Intercept and block requests to internal/private destinations."""
                 # Get hostname from URL
                 request_url = request.url
@@ -370,7 +371,7 @@ class Sandbox:
                     )
 
                     # Block the request
-                    route.abort()
+                    await route.abort()
                     return
 
                 # DNS rebinding protection for subresources: resolve and check actual IP
@@ -412,7 +413,7 @@ class Sandbox:
                             )
 
                             # Block the request
-                            route.abort()
+                            await route.abort()
                             return
 
                 except socket.gaierror as e:
@@ -428,7 +429,7 @@ class Sandbox:
                         }
                     )
                     # Block the request
-                    route.abort()
+                    await route.abort()
                     return
                 except Exception as e:
                     # Other resolution errors - block request for security
@@ -443,14 +444,14 @@ class Sandbox:
                         }
                     )
                     # Block the request
-                    route.abort()
+                    await route.abort()
                     return
 
                 # Allow external requests
-                route.continue_()
+                await route.continue_()
 
-            # Enable request interception
-            self.page.route('**', handle_request)
+            # Enable request interception (page.route is async in Playwright Python async API)
+            await self.page.route('**', handle_request)
 
         try:
             # Load URL with timeout
@@ -471,7 +472,7 @@ class Sandbox:
 
     async def is_healthy(self) -> bool:
         """Check if the browser context is still alive and usable.
-        
+
         Returns:
             True if browser and context are still connected, False otherwise
         """
@@ -479,16 +480,16 @@ class Sandbox:
             # Check if browser is still connected
             if not self.browser:
                 return False
-            
+
             # Handle both sync and async is_connected methods
             if inspect.iscoroutinefunction(self.browser.is_connected):
                 connected = await self.browser.is_connected()
             else:
                 connected = self.browser.is_connected()
-            
+
             if not connected:
                 return False
-            
+
             # Check if context is still valid by attempting to get pages
             # This will raise if the context has been closed
             pages = await self.context.pages()
@@ -528,7 +529,43 @@ class SandboxManager:
         self._isolation_validated = False  # Track if isolation is validated
         self._container_id: Optional[str] = None  # Container ID if running in Docker
         self.violation_monitor = violation_monitor
-    
+
+    def _detect_container_environment(self) -> bool:
+        """Detect if running inside a container environment.
+
+        Checks multiple indicators to reliably detect container execution:
+        1. /.dockerenv file (strong Docker evidence, present in all Docker containers)
+        2. cgroup v1 markers ("docker", "kubepods") in /proc/1/cgroup
+        3. For cgroup v2, requires /.dockerenv as additional evidence
+
+        IMPORTANT: Container detection is NOT security validation.
+        This only determines if we're in a container environment.
+        Security validation still requires _isolation_validated and _container_id.
+
+        Returns:
+            True if running in a container, False otherwise
+        """
+        # Check for Docker-specific file (strongest evidence)
+        try:
+            if os.path.exists('/.dockerenv'):
+                self.logger.debug("Detected Docker environment via /.dockerenv")
+                return True
+        except Exception:
+            pass
+
+        # Check cgroup for container markers (cgroup v1)
+        try:
+            with open('/proc/1/cgroup', 'r') as f:
+                cgroup_content = f.read()
+                if 'docker' in cgroup_content or 'kubepods' in cgroup_content:
+                    self.logger.debug("Detected container environment via cgroup v1 markers")
+                    return True
+        except (FileNotFoundError, IOError):
+            pass
+
+        # Not detected as container
+        return False
+
     def validate_isolation(self) -> Tuple[bool, str]:
         """Validate sandbox isolation boundaries.
 
@@ -544,12 +581,12 @@ class SandboxManager:
             - (True, "") if isolation is valid
             - (False, error_message) if isolation is invalid
         """
-        # Check if running inside Docker
+        # Check if running inside container
         try:
-            with open('/proc/1/cgroup', 'r') as f:
-                cgroup_content = f.read()
-                is_in_container = 'docker' in cgroup_content or 'kubepods' in cgroup_content
-        except (FileNotFoundError, IOError):
+            is_in_container = self._detect_container_environment()
+        except Exception as e:
+            # Detection failure - fail closed
+            self.logger.error(f"Container detection failed: {e}")
             is_in_container = False
 
         if is_in_container:
@@ -625,16 +662,16 @@ class SandboxManager:
 
     async def create_sandbox(self) -> Sandbox:
         """Create a new isolated sandbox environment with 15-second timeout.
-        
+
         Creates a Playwright browser instance with an isolated browser context.
         If initialization fails within 15 seconds, raises an exception.
         Thread-safe: Uses lock to prevent concurrent lifecycle operations.
-        
+
         Requirements: 1.1, 1.5
-        
+
         Returns:
             Sandbox instance with isolated browser context
-            
+
         Raises:
             TimeoutError: If sandbox initialization exceeds 15 seconds
             Exception: If sandbox initialization fails for other reasons
@@ -648,7 +685,7 @@ class SandboxManager:
                 else:
                     self.logger.warning("Existing sandbox is unhealthy, cleaning up and recreating")
                     await self._cleanup_partial_initialization()
-            
+
             self.logger.info("Starting sandbox initialization")
             start_time = datetime.now(timezone.utc)
 
@@ -688,7 +725,7 @@ class SandboxManager:
                     )
 
                 return self.current_sandbox
-                
+
             except asyncio.TimeoutError:
                 elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
                 error_msg = f"Sandbox initialization failed: exceeded {INITIALIZATION_TIMEOUT}s timeout (took {elapsed:.2f}s)"
@@ -696,7 +733,7 @@ class SandboxManager:
                 # Clean up any partial initialization
                 await self._cleanup_partial_initialization()
                 raise TimeoutError(error_msg)
-                
+
             except asyncio.CancelledError:
                 self.logger.warning("Sandbox initialization cancelled")
                 await self._cleanup_partial_initialization()
@@ -711,10 +748,10 @@ class SandboxManager:
                 self.logger.error(error_msg, exc_info=True)
                 await self._cleanup_partial_initialization()
                 raise Exception(error_msg)
-    
+
     async def _create_sandbox_internal(self) -> Sandbox:
         """Internal method to create sandbox without timeout wrapper.
-        
+
         Returns:
             Sandbox instance
         """
@@ -745,7 +782,7 @@ class SandboxManager:
                     f"Playwright initialization failed: {e}. "
                     "Sandbox initialization failed per fail-closed behavior."
                 )
-        
+
         if self.browser is None:
             # Launch browser with isolation settings
             # SECURITY WARNING: --no-sandbox and --disable-setuid-sandbox disable Chromium's sandbox.
@@ -776,7 +813,7 @@ class SandboxManager:
                 ]
             )
             self.logger.info("Launched Chromium browser with reduced attack surface")
-        
+
         # Create isolated browser context with downloads disabled
         context = await self.browser.new_context(
             ignore_https_errors=True,  # For SSL certificate analysis
@@ -786,10 +823,10 @@ class SandboxManager:
         self.logger.info("Created isolated browser context with downloads disabled")
 
         return Sandbox(self.browser, context, self, self.violation_monitor)
-    
+
     async def _cleanup_partial_initialization(self) -> None:
         """Clean up partial initialization state after failure.
-        
+
         Handles asyncio.CancelledError to ensure cleanup completes even on cancellation.
         State is guaranteed to be consistent after this method returns.
         """
@@ -804,7 +841,7 @@ class SandboxManager:
             self.logger.error(f"Error closing sandbox during partial cleanup: {str(e)}")
         finally:
             self.current_sandbox = None
-        
+
         try:
             if self.browser:
                 await self.browser.close()
@@ -816,7 +853,7 @@ class SandboxManager:
             self.logger.error(f"Error closing browser during partial cleanup: {str(e)}")
         finally:
             self.browser = None
-        
+
         try:
             if self.playwright:
                 await self.playwright.stop()
@@ -828,19 +865,19 @@ class SandboxManager:
             self.logger.error(f"Error stopping Playwright during partial cleanup: {str(e)}")
         finally:
             self.playwright = None
-        
+
         self._is_initialized = False
         self.logger.info("Cleaned up partial initialization state")
-    
+
     async def terminate_sandbox(self, force: bool = False) -> None:
         """Terminate the sandbox with graceful or forced shutdown.
-        
+
         Attempts graceful shutdown first, then forced termination if needed.
         Must complete within 10 seconds per requirements.
         Thread-safe: Uses lock to prevent concurrent lifecycle operations.
-        
+
         Requirements: 1.4, 1.6
-        
+
         Args:
             force: If True, skip graceful shutdown and force terminate immediately
         """
@@ -848,10 +885,10 @@ class SandboxManager:
             if self.current_sandbox is None:
                 self.logger.warning("No sandbox to terminate")
                 return
-            
+
             self.logger.info(f"Terminating sandbox (force={force})")
             start_time = datetime.now(timezone.utc)
-            
+
             try:
                 if force:
                     # Forced termination
@@ -869,24 +906,24 @@ class SandboxManager:
                             f"Graceful termination exceeded {TERMINATION_TIMEOUT}s (took {elapsed:.2f}s), forcing termination"
                         )
                         await self._force_terminate()
-                
+
                 termination_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                 self.logger.info(
                     f"Sandbox terminated in {termination_time:.2f}s",
                     extra={"extra_fields": {"termination_time_seconds": termination_time, "forced": force}}
                 )
-                
+
             except asyncio.CancelledError:
                 self.logger.warning("Sandbox termination cancelled, forcing cleanup")
                 await self._force_terminate()
                 raise
-                
+
             except Exception as e:
                 self.logger.error(f"Error during sandbox termination: {str(e)}", exc_info=True)
                 # Ensure cleanup happens even on error
                 await self._force_terminate()
                 raise
-    
+
     async def _graceful_terminate(self) -> None:
         """Perform graceful shutdown of sandbox resources."""
         try:
@@ -899,15 +936,15 @@ class SandboxManager:
             raise
         self.current_sandbox = None
         self._is_initialized = False
-    
+
     async def _force_terminate(self) -> None:
         """Force terminate all sandbox resources immediately.
-        
+
         Logs forced termination event as required by Requirement 1.6.
         Handles asyncio.CancelledError to ensure cleanup completes.
         """
         self.logger.warning("Forcing sandbox termination")
-        
+
         try:
             if self.current_sandbox:
                 await self.current_sandbox.close()
@@ -919,7 +956,7 @@ class SandboxManager:
             self.logger.error(f"Error closing sandbox during force termination: {str(e)}")
         finally:
             self.current_sandbox = None
-        
+
         try:
             if self.browser:
                 await self.browser.close()
@@ -931,7 +968,7 @@ class SandboxManager:
             self.logger.error(f"Error closing browser during force termination: {str(e)}")
         finally:
             self.browser = None
-        
+
         try:
             if self.playwright:
                 await self.playwright.stop()
@@ -943,10 +980,10 @@ class SandboxManager:
             self.logger.error(f"Error stopping Playwright during force termination: {str(e)}")
         finally:
             self.playwright = None
-        
+
         self._is_initialized = False
         self.logger.warning("Forced termination complete")
-    
+
     async def reset_sandbox(self) -> None:
         """Reset the sandbox environment between analyses.
 
@@ -978,23 +1015,23 @@ class SandboxManager:
             except Exception as e:
                 self.logger.error(f"Failed to create new sandbox during reset: {str(e)}", exc_info=True)
                 raise
-    
+
     async def get_sandbox(self) -> Sandbox:
         """Get the current sandbox instance.
-        
+
         Returns:
             Current Sandbox instance
-            
+
         Raises:
             RuntimeError: If no sandbox is initialized
         """
         if self.current_sandbox is None or not self._is_initialized:
             raise RuntimeError("Sandbox not initialized. Call create_sandbox() first.")
         return self.current_sandbox
-    
+
     async def cleanup(self) -> None:
         """Complete cleanup of all SandboxManager resources.
-        
+
         Call this when shutting down the application to ensure all resources
         are properly released.
         """

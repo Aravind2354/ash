@@ -4,13 +4,13 @@ These tests verify that the sandbox actually blocks internal network
 destinations at the browser level using real browser behavior.
 """
 
+import os
+import sys
 import pytest
 import asyncio
 from unittest.mock import Mock, patch
 
 # Add src to path for imports
-import sys
-import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.sandbox import SandboxManager
@@ -22,17 +22,30 @@ class TestPlaywrightSecurity:
 
     @pytest.fixture
     def sandbox_manager(self):
-        """Create a SandboxManager with ViolationMonitor."""
+        """Create a SandboxManager with ViolationMonitor.
+
+        IMPORTANT: This fixture uses the SANDBOX_CONTAINER_ID environment variable
+        as a test-infrastructure trust handoff from the host-side validation.
+
+        This trust handoff exists only to connect the host-side validation result
+        to the test process. It is not a production security mechanism.
+
+        The host validates the actual Docker container configuration before setting
+        this environment variable and running the tests.
+        """
         violation_monitor = ViolationMonitor()
-        return SandboxManager(violation_monitor=violation_monitor)
+        manager = SandboxManager(violation_monitor=violation_monitor)
 
-    async def test_external_website_loads(self, sandbox_manager):
+        # Read container ID from environment (set by host-side test orchestration)
+        container_id = os.environ.get('SANDBOX_CONTAINER_ID')
+        if container_id:
+            # Mark sandbox as validated using host-attested container ID
+            manager.set_isolation_validated(container_id)
+
+        yield manager
+
+    def test_external_website_loads(self, sandbox_manager):
         """Test that external websites can load."""
-        # This test would require real Docker and Playwright
-        # For now, we verify the architecture allows it
-        sandbox_manager._isolation_validated = True
-        sandbox_manager._container_id = 'test123'
-
         # Verify external URL is not blocked by hostname check
         assert not sandbox_manager.violation_monitor.is_internal_ip('example.com')
         assert not sandbox_manager.violation_monitor.is_internal_ip('www.google.com')
