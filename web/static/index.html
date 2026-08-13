@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Website Authenticity Detector</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Website Authenticity Detector</h1>
+            <p class="subtitle">AI-powered security analysis for website authenticity</p>
+        </header>
+
+        <main>
+            <section class="input-section">
+                <form id="analyze-form">
+                    <div class="form-group">
+                        <label for="url-input">Enter URL to analyze:</label>
+                        <input
+                            type="url"
+                            id="url-input"
+                            name="url"
+                            placeholder="https://example.com"
+                            required
+                            pattern="https?://.+"
+                        >
+                    </div>
+                    <button type="submit" id="analyze-button">Analyze Website</button>
+                </form>
+            </section>
+
+            <section id="status-section" class="status-section hidden">
+                <div class="status-message">
+                    <div class="spinner"></div>
+                    <p id="status-text">Analysis started...</p>
+                </div>
+            </section>
+
+            <section id="error-section" class="error-section hidden">
+                <div class="error-message">
+                    <h3>Error</h3>
+                    <p id="error-text"></p>
+                </div>
+            </section>
+
+            <section id="result-section" class="result-section hidden">
+                <div class="result-card">
+                    <h2>Analysis Result</h2>
+
+                    <div class="url-display">
+                        <strong>Analyzed URL:</strong>
+                        <span id="result-url"></span>
+                    </div>
+
+                    <div class="scores">
+                        <div class="score-card authenticity">
+                            <h3>Authenticity Score</h3>
+                            <div class="score-value" id="authenticity-score">--</div>
+                        </div>
+                        <div class="score-card fake">
+                            <h3>Fake Score</h3>
+                            <div class="score-value" id="fake-score">--</div>
+                        </div>
+                    </div>
+
+                    <div class="confidence">
+                        <strong>Confidence:</strong>
+                        <span id="confidence-indicator" class="confidence-badge">--</span>
+                    </div>
+
+                    <div class="factors">
+                        <h3>Top Factors</h3>
+                        <ol id="top-factors-list"></ol>
+                    </div>
+
+                    <div id="suspicious-section" class="suspicious hidden">
+                        <h3>Suspicious Indicators</h3>
+                        <ul id="suspicious-list"></ul>
+                    </div>
+
+                    <div class="analysis-data">
+                        <h3>Analysis Data</h3>
+                        <details>
+                            <summary>View detailed analysis data</summary>
+                            <pre id="analysis-data-json"></pre>
+                        </details>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p class="disclaimer">
+                <strong>DEVELOPMENT MODE</strong> - This is a mock implementation for UI development.
+                The real analysis pipeline will be implemented in future development phases.
+            </p>
+        </footer>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
