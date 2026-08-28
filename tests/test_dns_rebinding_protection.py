@@ -6,6 +6,7 @@ when public hostnames resolve to private IP addresses.
 
 import pytest
 import socket
+import asyncio
 from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime, timezone
 
@@ -92,6 +93,7 @@ class TestDNSRebindingProtection:
             with patch.object(sandbox, 'create_page', new_callable=AsyncMock):
                 mock_page = Mock()
                 mock_page.goto = AsyncMock()
+                mock_page.route = AsyncMock()
                 sandbox.page = mock_page
 
                 result = await sandbox.load_url('http://example.com')
@@ -200,7 +202,7 @@ class TestDNSRebindingProtection:
         """Test DNS rebinding protection for subresource requests."""
         with patch.object(sandbox, 'create_page', new_callable=AsyncMock):
             mock_page = Mock()
-            mock_page.route = Mock()
+            mock_page.route = AsyncMock()
             mock_page.goto = AsyncMock()
             sandbox.page = mock_page
 
@@ -212,8 +214,8 @@ class TestDNSRebindingProtection:
 
             # Test the handler with a request to a rebinding hostname
             mock_route = Mock()
-            mock_route.abort = Mock()
-            mock_route.continue_ = Mock()
+            mock_route.abort = AsyncMock()
+            mock_route.continue_ = AsyncMock()
 
             mock_request = Mock()
             mock_request.url = 'http://evil.com/resource.js'
@@ -225,8 +227,8 @@ class TestDNSRebindingProtection:
                     (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.168.1.1', 0))
                 ]
 
-                # Call the handler (sync function)
-                route_handler(mock_route, mock_request)
+                # Call the handler (async function) - we're already in async context
+                await route_handler(mock_route, mock_request)
 
                 # Should have blocked the request
                 mock_route.abort.assert_called_once()

@@ -381,7 +381,7 @@ class TestSandboxManager:
 
         with patch('src.sandbox.async_playwright') as mock_async_playwright:
             mock_async_playwright.return_value.start.side_effect = hanging_start
-            with patch('src.sandbox.PLAYWRIGHT_INIT_TIMEOUT', 0.1):
+            with patch('src.sandbox.INITIALIZATION_TIMEOUT', 0.1):
                 with pytest.raises(RuntimeError) as exc_info:
                     await manager._create_sandbox_internal()
 
@@ -866,14 +866,15 @@ class TestSandboxSecurity:
         mock_context = AsyncMock()
         
         manager.playwright = AsyncMock()
-        manager.playwright.chromium.launch = AsyncMock(return_value=mock_browser)
-        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        manager.playwright.chromium.launch_persistent_context = AsyncMock(return_value=mock_context)
+        mock_context._impl_obj = AsyncMock()
+        mock_context._impl_obj._browser = mock_browser
         
         await manager._create_sandbox_internal()
         
-        # Verify accept_downloads=False was passed
-        mock_browser.new_context.assert_called_once()
-        call_kwargs = mock_browser.new_context.call_args[1]
+        # Verify accept_downloads=False was passed to launch_persistent_context
+        manager.playwright.chromium.launch_persistent_context.assert_called_once()
+        call_kwargs = manager.playwright.chromium.launch_persistent_context.call_args[1]
         assert call_kwargs['accept_downloads'] is False
     
     @pytest.mark.asyncio

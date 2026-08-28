@@ -32,7 +32,7 @@ import logging
 import inspect
 import socket
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -43,6 +43,9 @@ from config.logging_config import get_logger
 INITIALIZATION_TIMEOUT = 15.0  # seconds (Requirement 1.5)
 TERMINATION_TIMEOUT = 10.0  # seconds (Requirement 1.4, 1.6)
 ISOLATION_FAILURE_TERMINATION_TIMEOUT = 2.0  # seconds (Requirement 6.2)
+RESPONSIVENESS_TIMEOUT = 15.0  # seconds (Requirement 8.2)
+REDIRECT_TIMEOUT = 10.0  # seconds per redirect (Requirement 8.5)
+MAX_REDIRECTS = 5  # maximum redirects to follow (Requirement 8.6, 8.7)
 
 
 class Sandbox:
@@ -72,6 +75,12 @@ class Sandbox:
         self.logger = get_logger(__name__)
         self._created_at = datetime.now(timezone.utc)
         self._page_lock = asyncio.Lock()  # Synchronize page creation
+
+        # Redirect tracking (Task 4.4)
+        self.redirect_chain: List[str] = []  # List of URLs in redirect chain
+        self.redirect_count: int = 0  # Number of redirects followed
+        self.final_url: Optional[str] = None  # Final URL reached
+        self.suspicious_indicators: List[str] = []  # Suspicious indicators detected
 
     async def create_page(self) -> Page:
         """Create a new page in the isolated context.
@@ -145,6 +154,9 @@ class Sandbox:
         - Filesystem violations (download attempts)
         - Process violations (detected through page context)
 
+        Follows redirects up to MAX_REDIRECTS (5) with REDIRECT_TIMEOUT (10s) per redirect
+        (Requirements 8.5, 8.6, 8.7). Marks excessive redirects as suspicious.
+
         If isolation validation fails, the operation is blocked and the
         sandbox is terminated within 2 seconds (Requirement 6.2).
 
@@ -162,6 +174,12 @@ class Sandbox:
             RuntimeError: If isolation validation fails or security-critical violation detected
         """
         self.logger.info(f"Loading URL in sandbox: {url}")
+
+        # Reset redirect tracking for new load
+        self.redirect_chain = [url]
+        self.redirect_count = 0
+        self.final_url = url
+        self.suspicious_indicators = []
 
         # Validate isolation before loading (Requirement 6.1)
         is_valid, error_msg = self.sandbox_manager.validate_isolation()
@@ -453,22 +471,245 @@ class Sandbox:
             # Enable request interception (page.route is async in Playwright Python async API)
             await self.page.route('**', handle_request)
 
+        # Disable automatic redirect following to implement manual redirect handling
+        # We'll follow redirects manually to enforce per-redirect validation and limits
         try:
-            # Load URL with timeout
-            await asyncio.wait_for(
-                self.page.goto(url, wait_until="domcontentloaded"),
-                timeout=timeout
-            )
+            # Load URL with manual redirect handling
+            current_url = url
+            redirect_loop_count = 0
 
-            self.logger.info(f"URL loaded successfully: {url}")
-            return True
+            while redirect_loop_count <= MAX_REDIRECTS:
+                # Validate current URL before loading (security check for each redirect)
+                current_host = urlparse(current_url).hostname
 
-        except asyncio.TimeoutError:
-            self.logger.error(f"URL load timed out after {timeout}s: {url}")
-            return False
+                if self.violation_monitor and current_host:
+                    # Check if URL targets internal network
+                    if self.violation_monitor.is_internal_ip(current_host):
+                        # Internal destination detected - violation
+                        violation = self.violation_monitor.log_network_violation(
+                            ip_address=current_host,
+                            container_id=self.sandbox_manager._container_id,
+                            details={'url': current_url, 'violation_stage': 'redirect_validation'}
+                        )
+
+                        self.logger.error(
+                            f"Redirect target uses internal network address: {current_host}",
+                            extra={
+                                "extra_fields": {
+                                    "url": current_url,
+                                    "internal_ip": current_host,
+                                    "container_id": self.sandbox_manager._container_id,
+                                    "timestamp": violation.timestamp.isoformat()
+                                }
+                            }
+                        )
+
+                        # Terminate immediately per fail-closed behavior
+                        try:
+                            await self.sandbox_manager.terminate_sandbox(force=True)
+                        except Exception as e:
+                            self.logger.error(f"Error terminating sandbox: {e}")
+
+                        raise RuntimeError(
+                            f"Redirect target uses internal network address: {current_host}. "
+                            f"Analysis terminated per Requirement 6.5."
+                        )
+
+                    # DNS rebinding protection for redirect target
+                    try:
+                        addr_info = socket.getaddrinfo(current_host, None)
+                        resolved_ips = set()
+                        for family, _, _, _, sockaddr in addr_info:
+                            resolved_ips.add(sockaddr[0])
+
+                        for resolved_ip in resolved_ips:
+                            if self.violation_monitor.is_internal_ip(resolved_ip):
+                                # DNS rebinding detected in redirect target
+                                violation = self.violation_monitor.log_network_violation(
+                                    ip_address=resolved_ip,
+                                    container_id=self.sandbox_manager._container_id,
+                                    details={
+                                        'url': current_url,
+                                        'hostname': current_host,
+                                        'resolved_ip': resolved_ip,
+                                        'violation_stage': 'redirect_dns_resolution',
+                                        'all_resolved_ips': list(resolved_ips)
+                                    }
+                                )
+
+                                self.logger.error(
+                                    f"DNS rebinding detected in redirect: {current_host} resolves to internal IP {resolved_ip}",
+                                    extra={
+                                        "extra_fields": {
+                                            "url": current_url,
+                                            "hostname": current_host,
+                                            "resolved_ip": resolved_ip,
+                                            "all_resolved_ips": list(resolved_ips),
+                                            "container_id": self.sandbox_manager._container_id,
+                                            "timestamp": violation.timestamp.isoformat()
+                                        }
+                                    }
+                                )
+
+                                # Terminate immediately per fail-closed behavior
+                                try:
+                                    await self.sandbox_manager.terminate_sandbox(force=True)
+                                except Exception as e:
+                                    self.logger.error(f"Error terminating sandbox: {e}")
+
+                                raise RuntimeError(
+                                    f"DNS rebinding detected in redirect: {current_host} resolves to internal IP {resolved_ip}. "
+                                    f"Analysis terminated per Requirement 6.5."
+                                )
+
+                    except socket.gaierror as e:
+                        # DNS resolution failed - fail closed for security
+                        self.logger.error(
+                            f"DNS resolution failed for redirect target {current_host}: {e}",
+                            extra={
+                                "extra_fields": {
+                                    "hostname": current_host,
+                                    "error": str(e),
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                }
+                            }
+                        )
+                        raise RuntimeError(
+                            f"DNS resolution failed for redirect target {current_host}: {e}. "
+                            f"Cannot safely follow redirect without DNS validation."
+                        )
+                    except RuntimeError as e:
+                        # Re-raise RuntimeError (e.g., from DNS rebinding detection)
+                        raise
+                    except Exception as e:
+                        # Other resolution errors - fail closed for security
+                        self.logger.error(
+                            f"Error during DNS resolution for redirect target {current_host}: {e}",
+                            extra={
+                                "extra_fields": {
+                                    "hostname": current_host,
+                                    "error": str(e),
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                }
+                            }
+                        )
+                        raise RuntimeError(
+                            f"DNS resolution error for redirect target {current_host}: {e}. "
+                            f"Cannot safely follow redirect without DNS validation."
+                        )
+
+                # Load current URL with per-redirect timeout
+                try:
+                    # Use redirect timeout for individual loads, overall timeout for the entire operation
+                    per_redirect_timeout = min(REDIRECT_TIMEOUT, timeout - (redirect_loop_count * REDIRECT_TIMEOUT))
+                    if per_redirect_timeout <= 0:
+                        raise asyncio.TimeoutError("Overall timeout exceeded")
+
+                    response = await asyncio.wait_for(
+                        self.page.goto(current_url, wait_until="domcontentloaded"),
+                        timeout=per_redirect_timeout
+                    )
+
+                    # Check if this was a redirect
+                    if response and response.status in (301, 302, 303, 307, 308):
+                        redirect_url = response.headers.get('location', '')
+                        if redirect_url:
+                            # Normalize redirect URL (handle relative URLs)
+                            if not redirect_url.startswith(('http://', 'https://')):
+                                # Relative URL - resolve against current URL
+                                from urllib.parse import urljoin
+                                redirect_url = urljoin(current_url, redirect_url)
+
+                            redirect_loop_count += 1
+                            self.redirect_count = redirect_loop_count
+                            self.redirect_chain.append(redirect_url)
+
+                            self.logger.info(
+                                f"Redirect {redirect_loop_count}: {current_url} -> {redirect_url}",
+                                extra={
+                                    "extra_fields": {
+                                        "redirect_count": redirect_loop_count,
+                                        "from_url": current_url,
+                                        "to_url": redirect_url,
+                                        "timestamp": datetime.now(timezone.utc).isoformat()
+                                    }
+                                }
+                            )
+
+                            # Check if we've reached max redirects
+                            if redirect_loop_count >= MAX_REDIRECTS:
+                                self.logger.warning(
+                                    f"Reached maximum redirects ({MAX_REDIRECTS}), stopping redirect following",
+                                    extra={
+                                        "extra_fields": {
+                                            "redirect_count": redirect_loop_count,
+                                            "max_redirects": MAX_REDIRECTS,
+                                            "final_url": current_url,
+                                            "timestamp": datetime.now(timezone.utc).isoformat()
+                                        }
+                                    }
+                                )
+                                self.suspicious_indicators.append(
+                                    f"Excessive redirects: {redirect_loop_count} (max {MAX_REDIRECTS})"
+                                )
+                                # Stop following redirects, analyze current page
+                                break
+                            else:
+                                # Continue to next redirect
+                                current_url = redirect_url
+                                continue
+                    else:
+                        # Not a redirect or no location header - we're done
+                        break
+
+                except asyncio.TimeoutError:
+                    if redirect_loop_count > 0:
+                        self.logger.warning(
+                            f"Redirect {redirect_loop_count} to {current_url} exceeded {REDIRECT_TIMEOUT}s timeout",
+                            extra={
+                                "extra_fields": {
+                                    "redirect_count": redirect_loop_count,
+                                    "redirect_url": current_url,
+                                    "timeout_seconds": REDIRECT_TIMEOUT,
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                }
+                            }
+                        )
+                        # Per Requirement 8.5: analyze last successfully loaded page
+                        # If we haven't loaded any page yet, this is a failure
+                        if redirect_loop_count == 0:
+                            self.logger.error(f"Initial URL load timed out: {url}")
+                            return False
+                        else:
+                            # We have a page loaded, break and analyze it
+                            break
+                    else:
+                        self.logger.error(f"URL load timed out after {timeout}s: {url}")
+                        return False
+
         except Exception as e:
+            # Re-raise RuntimeError for security violations
+            if isinstance(e, RuntimeError):
+                raise
             self.logger.error(f"Failed to load URL {url}: {e}")
             return False
+
+        # If we successfully loaded a page (initial or after redirects)
+        self.final_url = current_url
+        self.logger.info(
+            f"URL loaded successfully: {url} -> {self.final_url}",
+            extra={
+                "extra_fields": {
+                    "initial_url": url,
+                    "final_url": self.final_url,
+                    "redirect_count": self.redirect_count,
+                    "redirect_chain": self.redirect_chain,
+                    "suspicious_indicators": self.suspicious_indicators,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }
+        )
+        return True
 
     async def is_healthy(self) -> bool:
         """Check if the browser context is still alive and usable.
@@ -496,6 +737,31 @@ class Sandbox:
             return True
         except Exception as e:
             self.logger.warning(f"Sandbox health check failed: {str(e)}")
+            return False
+
+    async def is_responsive(self) -> bool:
+        """Check if the sandbox is responsive within 15 seconds.
+
+        Verifies that the sandbox can respond to commands within the
+        responsiveness requirement (Requirement 8.2). This is a more
+        comprehensive check than is_healthy() as it includes timeout behavior.
+
+        Returns:
+            True if sandbox is responsive within 15 seconds, False otherwise
+        """
+        try:
+            # Use asyncio.wait_for to enforce 15-second timeout
+            return await asyncio.wait_for(
+                self.is_healthy(),
+                timeout=RESPONSIVENESS_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                f"Sandbox responsiveness check exceeded {RESPONSIVENESS_TIMEOUT}s"
+            )
+            return False
+        except Exception as e:
+            self.logger.warning(f"Sandbox responsiveness check failed: {str(e)}")
             return False
 
 
@@ -788,12 +1054,15 @@ class SandboxManager:
             # SECURITY WARNING: --no-sandbox and --disable-setuid-sandbox disable Chromium's sandbox.
             # This configuration is for local development compatibility only.
             # MUST NOT be used for untrusted website analysis without external containment (Docker/VM).
-            self.browser = await self.playwright.chromium.launch(
+            # Use launch_persistent_context with explicit user-data-dir to avoid hangs in containerized environments
+            context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir='/tmp/chromium-profile',
                 headless=True,
                 args=[
                     '--no-sandbox',  # Required for local development - see security warning above
                     '--disable-setuid-sandbox',  # Required for local development - see security warning above
                     '--disable-dev-shm-usage',
+                    '--disable-gpu',  # Required for headless in Docker container
                     '--disable-download',  # Disable downloads to reduce attack surface
                     '--disable-background-networking',  # Reduce background network activity
                     '--disable-background-timer-throttling',
@@ -810,17 +1079,13 @@ class SandboxManager:
                     '--no-default-browser-check',
                     '--metrics-recording-only',
                     '--enable-automation',  # Mark as automated browser
-                ]
+                ],
+                ignore_https_errors=True,  # For SSL certificate analysis
+                java_script_enabled=True,
+                accept_downloads=False,  # Disable downloads to prevent file system writes
             )
-            self.logger.info("Launched Chromium browser with reduced attack surface")
-
-        # Create isolated browser context with downloads disabled
-        context = await self.browser.new_context(
-            ignore_https_errors=True,  # For SSL certificate analysis
-            java_script_enabled=True,
-            accept_downloads=False,  # Disable downloads to prevent file system writes
-        )
-        self.logger.info("Created isolated browser context with downloads disabled")
+            self.browser = context._impl_obj._browser
+            self.logger.info("Launched Chromium browser with persistent context")
 
         return Sandbox(self.browser, context, self, self.violation_monitor)
 

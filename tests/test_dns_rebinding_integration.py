@@ -12,7 +12,6 @@ import sys
 import pytest
 import pytest_asyncio
 import asyncio
-from playwright.async_api import async_playwright
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -21,7 +20,6 @@ from src.sandbox import SandboxManager
 from src.violation_monitor import ViolationMonitor
 
 
-@pytest.mark.playwright
 class TestDNSRebindingIntegration:
     """Integration tests for DNS rebinding protection with real browser."""
 
@@ -46,8 +44,14 @@ class TestDNSRebindingIntegration:
             # Mark sandbox as validated using host-attested container ID
             manager.set_isolation_validated(sandbox_container_id)
 
-        yield manager
-        await manager.cleanup()
+        try:
+            yield manager
+        finally:
+            # Cleanup
+            try:
+                await manager.cleanup()
+            except Exception:
+                pass  # Ignore cleanup errors
 
     @pytest.mark.asyncio
     async def test_external_https_website_loads(self, sandbox_manager):
@@ -68,11 +72,19 @@ class TestDNSRebindingIntegration:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://localhost:8080')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "localhost" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None
 
     @pytest.mark.asyncio
     async def test_127_0_0_1_blocked_at_url_level(self, sandbox_manager):
@@ -80,11 +92,19 @@ class TestDNSRebindingIntegration:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://127.0.0.1:8080')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "127.0.0.1" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None
 
     @pytest.mark.asyncio
     async def test_rfc1918_blocked_at_url_level(self, sandbox_manager):
@@ -100,11 +120,18 @@ class TestDNSRebindingIntegration:
             sandbox = await sandbox_manager.get_sandbox()
             sandbox_manager.violation_monitor.clear_violations()
 
+            # Internal IP violations raise RuntimeError (fail-closed behavior)
             with pytest.raises(RuntimeError) as exc_info:
                 await sandbox.load_url(url)
 
-            assert "internal network address" in str(exc_info.value)
+            # Verify error message
+            assert "internal network address" in str(exc_info.value).lower()
+
+            # Verify violation was logged
             assert sandbox_manager.violation_monitor.has_violations()
+
+            # Verify sandbox was terminated
+            assert sandbox_manager.current_sandbox is None
 
             # Clean up for next iteration
             await sandbox_manager.cleanup()
@@ -115,11 +142,19 @@ class TestDNSRebindingIntegration:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://169.254.169.254')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "169.254.169.254" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None
 
     @pytest.mark.asyncio
     async def test_link_local_blocked(self, sandbox_manager):
@@ -127,11 +162,19 @@ class TestDNSRebindingIntegration:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://169.254.1.1')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "169.254.1.1" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None
 
     @pytest.mark.asyncio
     async def test_public_website_subresources_allowed(self, sandbox_manager):
@@ -151,8 +194,12 @@ class TestDNSRebindingIntegration:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
-        with pytest.raises(RuntimeError):
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
+        with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://192.168.1.1')
+
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
 
         # Verify sandbox was terminated
         assert sandbox_manager.current_sandbox is None
@@ -170,18 +217,23 @@ class TestDNSRebindingIntegration:
         assert not sandbox_manager.violation_monitor.has_violations()
 
 
-@pytest.mark.playwright
 class TestRedirectHandling:
     """Test redirect handling with DNS rebinding protection."""
 
-    @pytest.fixture
-    def sandbox_manager(self, sandbox_container_id):
+    @pytest_asyncio.fixture
+    async def sandbox_manager(self, sandbox_container_id):
         """Create a SandboxManager instance for testing."""
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
         if sandbox_container_id:
             manager.set_isolation_validated(sandbox_container_id)
-        yield manager
+        try:
+            yield manager
+        finally:
+            try:
+                await manager.cleanup()
+            except Exception:
+                pass
 
     @pytest.mark.asyncio
     async def test_redirect_to_public_allowed(self, sandbox_manager):
@@ -201,27 +253,34 @@ class TestRedirectHandling:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
-        # This would require a server that redirects to internal IP
-        # For now, we test that the direct internal IP is blocked
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://192.168.1.1')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
 
 
-@pytest.mark.playwright
 class TestIPv6Handling:
     """Test IPv6 address handling with DNS rebinding protection."""
 
-    @pytest.fixture
-    def sandbox_manager(self, sandbox_container_id):
+    @pytest_asyncio.fixture
+    async def sandbox_manager(self, sandbox_container_id):
         """Create a SandboxManager instance for testing."""
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
         if sandbox_container_id:
             manager.set_isolation_validated(sandbox_container_id)
-        yield manager
+        try:
+            yield manager
+        finally:
+            try:
+                await manager.cleanup()
+            except Exception:
+                pass
 
     @pytest.mark.asyncio
     async def test_ipv6_loopback_blocked(self, sandbox_manager):
@@ -229,11 +288,19 @@ class TestIPv6Handling:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://[::1]:8080')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "::1" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None
 
     @pytest.mark.asyncio
     async def test_ipv6_ula_blocked(self, sandbox_manager):
@@ -241,11 +308,19 @@ class TestIPv6Handling:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://[fd00::1]:8080')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "fd00::1" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None
 
     @pytest.mark.asyncio
     async def test_ipv6_link_local_blocked(self, sandbox_manager):
@@ -253,8 +328,16 @@ class TestIPv6Handling:
         await sandbox_manager.create_sandbox()
         sandbox = await sandbox_manager.get_sandbox()
 
+        # Internal IP violations raise RuntimeError (fail-closed behavior)
         with pytest.raises(RuntimeError) as exc_info:
             await sandbox.load_url('http://[fe80::1]:8080')
 
-        assert "internal network address" in str(exc_info.value)
+        # Verify error message
+        assert "internal network address" in str(exc_info.value).lower()
+        assert "fe80::1" in str(exc_info.value).lower()
+
+        # Verify violation was logged
         assert sandbox_manager.violation_monitor.has_violations()
+
+        # Verify sandbox was terminated
+        assert sandbox_manager.current_sandbox is None

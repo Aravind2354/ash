@@ -143,17 +143,17 @@ class TestSandboxManagerLifecycleIsolation:
         """Test that create_sandbox terminates on validation failure."""
         with patch.object(sandbox_manager, '_create_sandbox_internal') as mock_create:
             with patch.object(sandbox_manager, 'validate_isolation') as mock_validate:
-                with patch.object(sandbox_manager, 'terminate_sandbox') as mock_terminate:
+                with patch.object(sandbox_manager, '_cleanup_partial_initialization') as mock_cleanup:
                     mock_sandbox = Mock()
                     mock_sandbox.is_healthy = Mock(return_value=True)
                     mock_create.return_value = mock_sandbox
                     mock_validate.return_value = (False, "Isolation failed")
 
-                    with pytest.raises(Exception) as exc_info:
+                    with pytest.raises(RuntimeError) as exc_info:
                         await sandbox_manager.create_sandbox()
 
                     assert "Isolation validation failed" in str(exc_info.value)
-                    mock_terminate.assert_called_once_with(force=True)
+                    mock_cleanup.assert_called_once()
 
     async def test_reset_sandbox_revalidates(self, sandbox_manager):
         """Test that reset_sandbox creates new sandbox with validation."""
@@ -207,7 +207,7 @@ class TestRuntimeViolationMonitoring:
         internal_url = "http://192.168.1.1/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(internal_url)
 
@@ -230,7 +230,7 @@ class TestRuntimeViolationMonitoring:
         public_url = "http://8.8.8.8/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             result = await mock_sandbox.load_url(public_url)
 
         assert result is True
@@ -245,7 +245,7 @@ class TestRuntimeViolationMonitoring:
         localhost_url = "http://127.0.0.1/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(localhost_url)
 
@@ -262,7 +262,7 @@ class TestRuntimeViolationMonitoring:
         mock_sandbox.sandbox_manager.validate_isolation = Mock(return_value=(True, ""))
 
         with patch.object(mock_sandbox.sandbox_manager, 'terminate_sandbox') as mock_terminate:
-            with patch.object(mock_sandbox.page, 'route', return_value=None):
+            with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
                 internal_url = "http://192.168.1.1/test"
 
                 with pytest.raises(RuntimeError):
@@ -291,7 +291,7 @@ class TestRuntimeViolationMonitoring:
         metadata_url = "http://169.254.169.254/latest/meta-data/"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(metadata_url)
 
@@ -305,7 +305,7 @@ class TestRuntimeViolationMonitoring:
         link_local_url = "http://169.254.1.1/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(link_local_url)
 
@@ -319,7 +319,7 @@ class TestRuntimeViolationMonitoring:
         external_url = "http://example.com"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             result = await mock_sandbox.load_url(external_url)
 
         # Should succeed (URL load attempt, not actual network success)
@@ -331,7 +331,7 @@ class TestRuntimeViolationMonitoring:
         internal_url = "http://192.168.1.1/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(internal_url)
 
@@ -351,7 +351,7 @@ class TestRuntimeViolationMonitoring:
         public_url = "http://8.8.8.8/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             result = await mock_sandbox.load_url(public_url)
 
         assert result is True
@@ -363,7 +363,7 @@ class TestRuntimeViolationMonitoring:
         localhost_url = "http://127.0.0.1/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(localhost_url)
 
@@ -378,7 +378,7 @@ class TestRuntimeViolationMonitoring:
         """Test that detected violations trigger sandbox termination."""
 
         with patch.object(mock_sandbox.sandbox_manager, 'terminate_sandbox') as mock_terminate:
-            with patch.object(mock_sandbox.page, 'route', return_value=None):
+            with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
                 internal_url = "http://192.168.1.1/test"
 
                 with pytest.raises(RuntimeError):
@@ -401,7 +401,7 @@ class TestRuntimeViolationMonitoring:
         metadata_url = "http://169.254.169.254/latest/meta-data/"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(metadata_url)
 
@@ -412,7 +412,7 @@ class TestRuntimeViolationMonitoring:
         link_local_url = "http://169.254.1.1/test"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             with pytest.raises(RuntimeError) as exc_info:
                 await mock_sandbox.load_url(link_local_url)
 
@@ -423,7 +423,7 @@ class TestRuntimeViolationMonitoring:
         external_url = "http://example.com"
 
         # Mock the route method to avoid async issues
-        with patch.object(mock_sandbox.page, 'route', return_value=None):
+        with patch.object(mock_sandbox.page, 'route', new_callable=AsyncMock):
             result = await mock_sandbox.load_url(external_url)
 
         # Should succeed (URL load attempt, not actual network success)

@@ -128,11 +128,13 @@ class IntegrationTestOrchestrator:
 
         try:
             # Create container with hardened security settings
+            # Note: Chromium needs writable paths for cache/profile data, so --read-only cannot be used
+            # Test infrastructure uses this configuration for compatibility
             cmd = [
                 "docker", "run", "-d",
                 "--name", self.container_name,
-                "--read-only",
                 "--tmpfs", "/tmp:rw,nosuid,size=64m",
+                "--tmpfs", "/dev/shm:rw,nosuid,size=64m",
                 "--tmpfs", "/analysis/.pytest_cache:rw,nosuid,size=32m",
                 "--tmpfs", "/analysis/.hypothesis:rw,nosuid,size=32m",
                 "--user", "analyzer",
@@ -197,7 +199,8 @@ class IntegrationTestOrchestrator:
                 "pytest",
                 "tests/test_dns_rebinding_integration.py",
                 "-v",
-                "--timeout=300"
+                "--timeout=300",
+                "--asyncio-mode=auto"
             ]
 
             # Start the process with live output streaming

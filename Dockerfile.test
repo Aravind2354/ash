@@ -36,10 +36,10 @@ RUN useradd -m -u 1000 analyzer
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Install Playwright and Chromium as root, then move to analyzer user
-RUN playwright install --with-deps chromium
+# Install Playwright and Chromium as root, then copy to analyzer user's home
+RUN playwright install --with-deps chromium chromium-headless-shell
 
-# Move Playwright cache to analyzer user's home directory
+# Copy Playwright cache to analyzer user's home directory
 RUN mkdir -p /home/analyzer/.cache && \
     cp -r /root/.cache/ms-playwright /home/analyzer/.cache/ && \
     chown -R analyzer:analyzer /home/analyzer/.cache
@@ -55,6 +55,7 @@ WORKDIR /analysis
 # Copy application code
 COPY src/ /analysis/src/
 COPY config/ /analysis/config/
+COPY pyproject.toml /analysis/
 
 # Copy scripts for test orchestration
 COPY scripts/ /analysis/scripts/
