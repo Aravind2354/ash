@@ -124,7 +124,6 @@ class ContainerManager:
             "cap_add": [],  # No additional capabilities
             "privileged": False,  # No privileged mode
             "volumes": {},  # No volumes by default
-            "binds": None,  # No bind mounts by default
             "tmpfs": {},  # No tmpfs by default
             "detach": True,
         }

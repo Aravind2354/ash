@@ -48,7 +48,7 @@ class AuthenticityDetector:
             report_generator: Optional ReportGenerator instance.
         """
         self.validator = validator or InputValidator()
-        self.sandbox_manager = sandbox_manager
+        self.sandbox_manager = sandbox_manager or SandboxManager()
         self.data_collector = data_collector or DataCollector()
         self.ai_engine = ai_engine or AIAnalysisEngine()
         self.report_generator = report_generator or ReportGenerator()
@@ -193,23 +193,23 @@ class AuthenticityDetector:
 
                 # Step 7: Collect AnalysisData
                 current_operation = "data collection"
-                collect_res = self.data_collector.collect_all(sandbox, timeout=INITIAL_COLLECTION_TIMEOUT)
+                collect_res = self.data_collector.collect_all(sandbox, url, timeout=INITIAL_COLLECTION_TIMEOUT)
                 if inspect.isawaitable(collect_res):
                     analysis_data = await collect_res
                 else:
                     analysis_data = collect_res
 
-                # SSL Data Collection
-                try:
-                    ssl_res = self.data_collector.collect_ssl_data(url)
-                    if inspect.isawaitable(ssl_res):
-                        ssl_data = await ssl_res
-                    else:
-                        ssl_data = ssl_res
-                    if analysis_data is not None:
+                # SSL Data Collection fallback if not already populated
+                if analysis_data is not None and getattr(analysis_data, "ssl", None) is None:
+                    try:
+                        ssl_res = self.data_collector.collect_ssl_data(url)
+                        if inspect.isawaitable(ssl_res):
+                            ssl_data = await ssl_res
+                        else:
+                            ssl_data = ssl_res
                         analysis_data.ssl = ssl_data
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
                 categories_count = 0
                 if analysis_data is not None:
@@ -230,7 +230,7 @@ class AuthenticityDetector:
                     self.logger.warning(
                         f"Insufficient categories collected ({categories_count}/5). Initiating ONE retry with +30s extended timeout ({RETRY_COLLECTION_TIMEOUT}s)."
                     )
-                    retry_res = self.data_collector.collect_all(sandbox, timeout=RETRY_COLLECTION_TIMEOUT)
+                    retry_res = self.data_collector.collect_all(sandbox, url, timeout=RETRY_COLLECTION_TIMEOUT)
                     if inspect.isawaitable(retry_res):
                         retry_data = await retry_res
                     else:

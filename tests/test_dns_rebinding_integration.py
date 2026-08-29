@@ -43,6 +43,7 @@ class TestDNSRebindingIntegration:
         if sandbox_container_id:
             # Mark sandbox as validated using host-attested container ID
             manager.set_isolation_validated(sandbox_container_id)
+            manager._detect_container_environment = lambda: True
 
         try:
             yield manager
@@ -227,6 +228,7 @@ class TestRedirectHandling:
         manager = SandboxManager(violation_monitor=violation_monitor)
         if sandbox_container_id:
             manager.set_isolation_validated(sandbox_container_id)
+            manager._detect_container_environment = lambda: True
         try:
             yield manager
         finally:
@@ -274,6 +276,7 @@ class TestIPv6Handling:
         manager = SandboxManager(violation_monitor=violation_monitor)
         if sandbox_container_id:
             manager.set_isolation_validated(sandbox_container_id)
+            manager._detect_container_environment = lambda: True
         try:
             yield manager
         finally:

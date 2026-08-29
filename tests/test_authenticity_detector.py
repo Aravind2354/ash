@@ -227,7 +227,7 @@ class TestTask12_1_MainAnalysisOrchestration:
 
         detector.analyze_website("https://example.com")
 
-        mock_data_collector.collect_all.assert_called_once_with(mock_sandbox, timeout=60)
+        mock_data_collector.collect_all.assert_called_once_with(mock_sandbox, "https://example.com", timeout=60)
 
     def test_ai_engine_invoked_with_collected_data(
         self,
