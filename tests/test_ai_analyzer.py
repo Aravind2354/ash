@@ -748,3 +748,330 @@ class TestTopFactorsAndSuspiciousIndicators:
             assert not factor.startswith("Data corruption")
             assert not factor.startswith("Failed")
             assert not factor.startswith("Insufficient")
+
+
+# ---------------------------------------------------------------------------
+# Test Suite 9: AI Analysis Edge Cases (Task 8.9, Requirements 3.7 & 3.8)
+# ---------------------------------------------------------------------------
+
+class TestAIAnalysisEdgeCases:
+    """
+    Edge-case and boundary unit tests for AIAnalysisEngine (Task 8.9).
+    Validates: Requirements 3.7 and 3.8.
+    """
+
+    def test_boundary_all_ten_3_category_combinations(
+        self, engine, valid_network, valid_dom, valid_js, valid_visual, valid_ssl
+    ):
+        """
+        Requirement 3.5 & Task 8.9: Test ALL 10 combinations of exactly 3 active categories.
+        C(5, 3) = 10 combinations:
+          1. network + dom + javascript
+          2. network + dom + visual
+          3. network + dom + ssl
+          4. network + javascript + visual
+          5. network + javascript + ssl
+          6. network + visual + ssl
+          7. dom + javascript + visual
+          8. dom + javascript + ssl
+          9. dom + visual + ssl
+          10. javascript + visual + ssl
+        """
+        cat_pool = {
+            "network": valid_network,
+            "dom": valid_dom,
+            "javascript": valid_js,
+            "visual": valid_visual,
+            "ssl": valid_ssl,
+        }
+
+        import itertools
+        all_3_combos = list(itertools.combinations(["network", "dom", "javascript", "visual", "ssl"], 3))
+        assert len(all_3_combos) == 10
+
+        for combo in all_3_combos:
+            data = AnalysisData(
+                network=cat_pool["network"] if "network" in combo else None,
+                dom=cat_pool["dom"] if "dom" in combo else None,
+                javascript=cat_pool["javascript"] if "javascript" in combo else None,
+                visual=cat_pool["visual"] if "visual" in combo else None,
+                ssl=cat_pool["ssl"] if "ssl" in combo else None,
+                timeout_occurred=False,
+            )
+
+            is_valid, msg = engine.validate_data(data)
+            assert is_valid is True, f"Validation failed for combo {combo}: {msg}"
+            assert msg == ""
+
+            scores = engine.analyze(data)
+            assert isinstance(scores, AnalysisScores)
+            assert 0.0 <= scores.authenticity_score <= 1.0
+            assert 0.0 <= scores.fake_score <= 1.0
+            assert abs(scores.authenticity_score + scores.fake_score - 1.0) <= 0.01
+            assert len(scores.top_factors) == 3, f"Expected exactly 3 top_factors for combo {combo}"
+            assert len(set(scores.top_factors)) == 3, f"Expected unique top_factors for combo {combo}"
+
+    def test_boundary_transition_2_to_3_categories(self, engine, valid_network, valid_dom, valid_js):
+        """
+        Explicit boundary transition: 2 active categories fail, adding 1 active category succeeds.
+        """
+        # Exactly 2 categories -> rejected
+        data_2 = AnalysisData(network=valid_network, dom=valid_dom, javascript=None, visual=None, ssl=None)
+        is_valid_2, msg_2 = engine.validate_data(data_2)
+        assert is_valid_2 is False
+        assert "Insufficient data" in msg_2
+        with pytest.raises(ValueError) as exc_2:
+            engine.analyze(data_2)
+        assert "Insufficient data" in str(exc_2.value)
+
+        # Transition to 3 categories -> accepted
+        data_3 = AnalysisData(network=valid_network, dom=valid_dom, javascript=valid_js, visual=None, ssl=None)
+        is_valid_3, msg_3 = engine.validate_data(data_3)
+        assert is_valid_3 is True
+        assert msg_3 == ""
+        scores = engine.analyze(data_3)
+        assert isinstance(scores, AnalysisScores)
+        assert 0.0 <= scores.authenticity_score <= 1.0
+
+    def test_boundary_failed_category_drops_below_threshold(self, engine, valid_network, valid_dom, valid_js):
+        """
+        3 categories present, but 1 has failed=True -> active categories = 2 -> raises ValueError.
+        """
+        failed_js = JavaScriptData(script_count=0, dom_modifications=0, external_api_calls=0, failed=True)
+        data = AnalysisData(network=valid_network, dom=valid_dom, javascript=failed_js, visual=None, ssl=None)
+
+        is_valid, msg = engine.validate_data(data)
+        assert is_valid is False
+        assert "Insufficient data" in msg
+
+        with pytest.raises(ValueError) as exc_info:
+            engine.analyze(data)
+        assert "Insufficient data" in str(exc_info.value)
+
+    def test_partial_score_all_five_4_category_combinations(
+        self, engine, valid_network, valid_dom, valid_js, valid_visual, valid_ssl
+    ):
+        """
+        Requirement 3.7 & Task 8.9: Test ALL 5 combinations of exactly 4 active categories.
+        C(5, 4) = 5 combinations (each omitting 1 category).
+        """
+        cat_pool = {
+            "network": valid_network,
+            "dom": valid_dom,
+            "javascript": valid_js,
+            "visual": valid_visual,
+            "ssl": valid_ssl,
+        }
+
+        import itertools
+        all_4_combos = list(itertools.combinations(["network", "dom", "javascript", "visual", "ssl"], 4))
+        assert len(all_4_combos) == 5
+
+        for combo in all_4_combos:
+            data = AnalysisData(
+                network=cat_pool["network"] if "network" in combo else None,
+                dom=cat_pool["dom"] if "dom" in combo else None,
+                javascript=cat_pool["javascript"] if "javascript" in combo else None,
+                visual=cat_pool["visual"] if "visual" in combo else None,
+                ssl=cat_pool["ssl"] if "ssl" in combo else None,
+                timeout_occurred=False,
+            )
+
+            scores = engine.analyze(data)
+            assert isinstance(scores, AnalysisScores)
+            assert 0.0 <= scores.authenticity_score <= 1.0
+            assert 0.0 <= scores.fake_score <= 1.0
+            assert abs(scores.authenticity_score + scores.fake_score - 1.0) <= 0.01
+            assert len(scores.top_factors) == 3
+            assert len(set(scores.top_factors)) == 3
+
+    def test_partial_score_missing_categories_contribute_zero_weight(
+        self, engine, valid_network, valid_dom, valid_js
+    ):
+        """
+        Requirement 3.7: Missing categories do not distort active weight normalization.
+        Weights are normalized dynamically across ONLY the active categories.
+        """
+        data_3 = AnalysisData(network=valid_network, dom=valid_dom, javascript=valid_js)
+        scores = engine.analyze(data_3)
+
+        # Base weights: network=0.20, dom=0.20, javascript=0.20 (total active = 0.60)
+        # Each active category gets relative weight 0.20 / 0.60 = 1/3
+        score_net, _, _ = engine._evaluate_network(valid_network)
+        score_dom, _, _ = engine._evaluate_dom(valid_dom)
+        score_js, _, _ = engine._evaluate_javascript(valid_js)
+
+        expected_authenticity = (score_net + score_dom + score_js) / 3.0
+        assert abs(scores.authenticity_score - expected_authenticity) <= 0.0001
+
+    def test_partial_score_evaluator_error_aborts_without_scores(
+        self, engine, valid_network, valid_dom, valid_js, monkeypatch
+    ):
+        """
+        Requirement 3.7: When an error occurs during evaluation, analysis aborts
+        and does not return fabricated/partial scores as if analysis completed.
+        """
+        def crashing_evaluator(js):
+            raise RuntimeError("Simulated crash in JavaScript evaluator")
+
+        monkeypatch.setattr(engine, "_evaluate_javascript", crashing_evaluator)
+
+        data = AnalysisData(network=valid_network, dom=valid_dom, javascript=valid_js)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            engine.analyze(data)
+        assert "Simulated crash" in str(exc_info.value)
+
+    def test_timeout_default_constant_is_10_seconds(self, engine):
+        """
+        Requirement 3.8: Verify DEFAULT_ANALYSIS_TIMEOUT constant is 10 and default parameter is 10.
+        """
+        import inspect
+        assert DEFAULT_ANALYSIS_TIMEOUT == 10
+        sig = inspect.signature(engine.analyze)
+        assert sig.parameters["timeout"].default == 10
+
+    def test_timeout_simulated_elapsed_exceeds_10_seconds(self, engine, full_analysis_data, monkeypatch):
+        """
+        Requirement 3.8: Deterministic simulation of analysis taking > 10 seconds.
+        Does NOT sleep for 10 real seconds.
+        """
+        call_count = 0
+        def fake_monotonic():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 100.0   # start_time
+            return 110.05      # elapsed = 10.05 > 10.0
+
+        monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            engine.analyze(full_analysis_data, timeout=10)
+
+        err_msg = str(exc_info.value)
+        assert "timed out" in err_msg.lower()
+        assert "10" in err_msg
+
+    def test_timeout_custom_threshold_enforced(self, engine, full_analysis_data, monkeypatch):
+        """
+        Requirement 3.8: Custom timeout threshold (e.g. 2.0s) is enforced deterministically.
+        """
+        call_count = 0
+        def fake_monotonic_over():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 50.0
+            return 52.5  # elapsed = 2.5 > 2.0
+
+        monkeypatch.setattr(time, "monotonic", fake_monotonic_over)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            engine.analyze(full_analysis_data, timeout=2.0)
+        assert "timed out" in str(exc_info.value).lower()
+        assert "2.0" in str(exc_info.value) or "2" in str(exc_info.value)
+
+        # Under threshold succeeds
+        call_count = 0
+        def fake_monotonic_under():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 50.0
+            return 51.0  # elapsed = 1.0 < 2.0
+
+        monkeypatch.setattr(time, "monotonic", fake_monotonic_under)
+        scores = engine.analyze(full_analysis_data, timeout=2.0)
+        assert isinstance(scores, AnalysisScores)
+
+    def test_timeout_zero_raises(self, engine, full_analysis_data):
+        """
+        Requirement 3.8: timeout=0 raises TimeoutError immediately.
+        """
+        with pytest.raises(TimeoutError) as exc_info:
+            engine.analyze(full_analysis_data, timeout=0)
+        assert "timed out" in str(exc_info.value).lower()
+
+    def test_timeout_negative_raises(self, engine, full_analysis_data):
+        """
+        Requirement 3.8: Negative timeout raises TimeoutError immediately.
+        """
+        with pytest.raises(TimeoutError) as exc_info:
+            engine.analyze(full_analysis_data, timeout=-1)
+        assert "timed out" in str(exc_info.value).lower()
+
+    def test_extreme_metrics_clamped_to_valid_range(self, engine):
+        """
+        Score clamping on extreme valid input metrics (massive element counts, requests, mutations).
+        """
+        extreme_net = NetworkData(
+            request_count=100_000,
+            unique_domains=[f"domain{i}.com" for i in range(50)],
+            protocol_distribution={"https": 100_000},
+            failed=False,
+        )
+        extreme_dom = DOMData(
+            html_content="<div>" * 50_000 + "</div>" * 50_000,
+            structure_metrics={"total_elements": 50_000, "form_count": 500, "iframe_count": 100},
+            failed=False,
+        )
+        extreme_js = JavaScriptData(
+            script_count=500,
+            dom_modifications=50_000,
+            external_api_calls=1_000,
+            failed=False,
+        )
+        extreme_visual = VisualData(
+            screenshot_path="/tmp/huge_screenshot.png",
+            layout_characteristics={"viewport_width": 7680, "viewport_height": 4320, "image_count": 500, "has_images": True},
+            failed=False,
+        )
+        extreme_ssl = SSLData(
+            issuer="CN=Root CA",
+            expiration_date="2040-01-01T00:00:00Z",
+            chain_valid=True,
+            failed=False,
+        )
+
+        data = AnalysisData(
+            network=extreme_net,
+            dom=extreme_dom,
+            javascript=extreme_js,
+            visual=extreme_visual,
+            ssl=extreme_ssl,
+            timeout_occurred=False,
+        )
+
+        scores = engine.analyze(data)
+        assert 0.0 <= scores.authenticity_score <= 1.0
+        assert 0.0 <= scores.fake_score <= 1.0
+        assert abs(scores.authenticity_score + scores.fake_score - 1.0) <= 0.01
+        assert len(scores.top_factors) == 3
+        assert len(set(scores.top_factors)) == 3
+
+    def test_zero_metric_boundaries(self, engine):
+        """
+        Boundary condition: zero and empty metric fields across all categories.
+        """
+        zero_net = NetworkData(request_count=0, unique_domains=[], protocol_distribution={}, failed=False)
+        zero_dom = DOMData(html_content="", structure_metrics={}, failed=False)
+        zero_js = JavaScriptData(script_count=0, dom_modifications=0, external_api_calls=0, failed=False)
+        zero_visual = VisualData(screenshot_path="", layout_characteristics={}, failed=False)
+        zero_ssl = SSLData(issuer="", expiration_date="", chain_valid=False, failed=False)
+
+        data = AnalysisData(
+            network=zero_net,
+            dom=zero_dom,
+            javascript=zero_js,
+            visual=zero_visual,
+            ssl=zero_ssl,
+            timeout_occurred=False,
+        )
+
+        scores = engine.analyze(data)
+        assert 0.0 <= scores.authenticity_score <= 1.0
+        assert 0.0 <= scores.fake_score <= 1.0
+        assert abs(scores.authenticity_score + scores.fake_score - 1.0) <= 0.01
+        assert len(scores.top_factors) == 3
+        assert len(set(scores.top_factors)) == 3
