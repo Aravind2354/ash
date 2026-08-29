@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "authenticity_score",
+    "fake_score",
+    "confidence_indicator",
+    "url",
+    "timestamps"
+  ],
+  "properties": {
+    "authenticity_score": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d{2}%$",
+      "description": "Authenticity percentage (e.g., '85.50%')"
+    },
+    "fake_score": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d{2}%$",
+      "description": "Fake probability percentage (e.g., '14.50%')"
+    },
+    "confidence_indicator": {
+      "type": "string",
+      "enum": ["HIGH", "MEDIUM", "LOW"]
+    },
+    "url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "analysis_data": {
+      "type": "object",
+      "properties": {
+        "network": { "type": ["object", "null"] },
+        "dom": { "type": ["object", "null"] },
+        "javascript": { "type": ["object", "null"] },
+        "visual": { "type": ["object", "null"] },
+        "ssl": { "type": ["object", "null"] }
+      }
+    },
+    "timestamps": {
+      "type": "object",
+      "required": ["analysis_start", "analysis_completion"],
+      "properties": {
+        "analysis_start": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        },
+        "analysis_completion": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        }
+      }
+    },
+    "top_factors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 3,
+      "description": "Top 3 factors influencing authenticity score"
+    },
+    "suspicious_indicators": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Data elements contributing to Fake_Score > 0.5"
+    },
+    "error_message": {
+      "type": ["string", "null"],
+      "description": "Error message if analysis failed"
+    }
+  }
+}

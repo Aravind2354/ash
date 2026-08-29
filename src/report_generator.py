@@ -11,9 +11,13 @@ Implements:
 Validates Requirements: 4.1, 4.2, 4.3, 4.7, 7.1, 7.2
 """
 
+import json
 from datetime import datetime, timezone
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import jsonschema
 
 from src.models import AnalysisData, AnalysisResult
 
@@ -151,4 +155,203 @@ class ReportGenerator:
                 list(result.suspicious_indicators) if result.suspicious_indicators is not None else []
             ),
             "error_message": result.error_message,
+        }
+
+    def export_json(self, result: AnalysisResult) -> str:
+        """
+        Export analysis report as a formatted JSON string validated against report_schema.json.
+
+        Task 10.3 (Requirement 7.5, Property 26):
+        1. Generates report dictionary via generate_report(result)
+        2. Loads src/report_schema.json
+        3. Validates report dictionary against JSON Schema using jsonschema.validate()
+        4. Serializes validated report into a JSON string using json.dumps()
+
+        Args:
+            result: AnalysisResult object to export.
+
+        Returns:
+            Validated JSON string representation of the analysis report.
+
+        Raises:
+            jsonschema.exceptions.ValidationError: If report dictionary violates report_schema.json.
+        """
+        report_dict = self.generate_report(result)
+
+        schema_path = Path(__file__).parent / "report_schema.json"
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+
+        format_checker = jsonschema.FormatChecker()
+        if "uri" not in format_checker.checkers:
+            @format_checker.checks("uri")
+            def _check_uri(val: Any) -> bool:
+                if not isinstance(val, str):
+                    return True
+                from urllib.parse import urlparse
+                parsed = urlparse(val)
+                return bool(parsed.scheme and (parsed.netloc or parsed.path))
+
+        jsonschema.validate(instance=report_dict, schema=schema, format_checker=format_checker)
+
+        return json.dumps(report_dict, indent=2)
+
+    def generate_partial_report(
+        self,
+        result: Optional[AnalysisResult] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Generate a partial structured report dictionary preserving valid fields and marking missing/failed fields.
+
+        Task 10.5 (Requirement 7.6, Property 27):
+        - Preserves all valid report fields
+        - Marks missing or ungeneratable fields as None (or empty lists for factor lists)
+        - Returns a descriptive error_message listing every field that could not be generated
+
+        Args:
+            result: Optional AnalysisResult instance (may have missing/invalid fields).
+            **kwargs: Additional parameters for customization or fallback.
+
+        Returns:
+            Dictionary containing partial report fields and failure tracking in error_message.
+        """
+        failed_fields: List[str] = []
+
+        # 1. Scores (authenticity_score, fake_score)
+        auth_score_val = None
+        fake_score_val = None
+        if result is not None and hasattr(result, "authenticity_score") and hasattr(result, "fake_score"):
+            try:
+                auth = result.authenticity_score
+                fake = result.fake_score
+                if (
+                    isinstance(auth, (int, float))
+                    and isinstance(fake, (int, float))
+                    and not isinstance(auth, bool)
+                    and not isinstance(fake, bool)
+                ):
+                    scores_formatted = self.format_scores(float(auth), float(fake))
+                    auth_score_val = scores_formatted["authenticity_score"]
+                    fake_score_val = scores_formatted["fake_score"]
+                else:
+                    failed_fields.extend(["authenticity_score", "fake_score"])
+            except Exception:
+                failed_fields.extend(["authenticity_score", "fake_score"])
+        else:
+            failed_fields.extend(["authenticity_score", "fake_score"])
+
+        # 2. Confidence Indicator
+        conf_val = None
+        if result is not None and getattr(result, "confidence_indicator", None) is not None:
+            try:
+                ci_str = str(result.confidence_indicator).strip()
+                if ci_str and ci_str.upper() in ("HIGH", "MEDIUM", "LOW"):
+                    conf_val = ci_str.upper()
+                elif ci_str:
+                    conf_val = ci_str
+                else:
+                    failed_fields.append("confidence_indicator")
+            except Exception:
+                failed_fields.append("confidence_indicator")
+        else:
+            failed_fields.append("confidence_indicator")
+
+        # 3. Target URL
+        url_val = None
+        if result is not None and getattr(result, "url", None) is not None:
+            try:
+                u_str = str(result.url).strip()
+                if u_str:
+                    url_val = u_str
+                else:
+                    failed_fields.append("url")
+            except Exception:
+                failed_fields.append("url")
+        else:
+            failed_fields.append("url")
+
+        # 4. Analysis Data
+        analysis_data_val = None
+        if result is not None and getattr(result, "analysis_data", None) is not None:
+            try:
+                analysis_data_val = self._serialize_analysis_data(result.analysis_data)
+            except Exception:
+                analysis_data_val = {
+                    "network": None,
+                    "dom": None,
+                    "javascript": None,
+                    "visual": None,
+                    "ssl": None,
+                }
+                failed_fields.append("analysis_data")
+        else:
+            analysis_data_val = {
+                "network": None,
+                "dom": None,
+                "javascript": None,
+                "visual": None,
+                "ssl": None,
+            }
+            if result is None or not hasattr(result, "analysis_data"):
+                failed_fields.append("analysis_data")
+
+        # 5. Timestamps
+        timestamps_val = None
+        if result is not None and getattr(result, "timestamps", None) is not None:
+            try:
+                if isinstance(result.timestamps, dict):
+                    timestamps_val = dict(result.timestamps)
+                    if not timestamps_val or "analysis_start" not in timestamps_val or "analysis_completion" not in timestamps_val:
+                        failed_fields.append("timestamps")
+                else:
+                    failed_fields.append("timestamps")
+            except Exception:
+                failed_fields.append("timestamps")
+        else:
+            failed_fields.append("timestamps")
+
+        # 6. Top Factors
+        top_factors_val: List[str] = []
+        if result is not None and getattr(result, "top_factors", None) is not None:
+            try:
+                top_factors_val = list(result.top_factors)
+            except Exception:
+                top_factors_val = []
+                failed_fields.append("top_factors")
+        else:
+            top_factors_val = []
+
+        # 7. Suspicious Indicators
+        susp_val: List[str] = []
+        if result is not None and getattr(result, "suspicious_indicators", None) is not None:
+            try:
+                susp_val = list(result.suspicious_indicators)
+            except Exception:
+                susp_val = []
+                failed_fields.append("suspicious_indicators")
+        else:
+            susp_val = []
+
+        # 8. Error Message Construction
+        if failed_fields:
+            seen = set()
+            dedup_failed = [f for f in failed_fields if not (f in seen or seen.add(f))]
+            msg = f"Partial report generated. Failed fields: {dedup_failed}"
+            if result is not None and getattr(result, "error_message", None):
+                msg += f". Prior error: {result.error_message}"
+            err_msg = msg
+        else:
+            err_msg = getattr(result, "error_message", None) if result is not None else None
+
+        return {
+            "authenticity_score": auth_score_val,
+            "fake_score": fake_score_val,
+            "confidence_indicator": conf_val,
+            "url": url_val,
+            "analysis_data": analysis_data_val,
+            "timestamps": timestamps_val,
+            "top_factors": top_factors_val,
+            "suspicious_indicators": susp_val,
+            "error_message": err_msg,
         }
