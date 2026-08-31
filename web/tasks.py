@@ -212,10 +212,23 @@ async def run_analysis_task(task_id: str, url: str):
         result = await detector.analyze_website_async(url, progress_callback=on_progress)
 
         if isinstance(result, dict):
-            if result.get("risk_level") == "INCONCLUSIVE":
-                result["status"] = "inconclusive"
+            if result.get("risk_level") == "INCONCLUSIVE" or result.get("classification") == "INCONCLUSIVE":
+                result["status"] = "completed"
+                result["classification"] = "INCONCLUSIVE"
+                result["risk_level"] = "INCONCLUSIVE"
+                result["authenticity_score"] = None
+                result["fake_score"] = None
+                result["confidence"] = result.get("confidence") or result.get("confidence_indicator") or "LOW"
+                result["confidence_indicator"] = result.get("confidence_indicator") or "LOW"
+                result["xgboost_executed"] = False
+                result["xgboost_probability"] = None
+                if not result.get("reason"):
+                    result["reason"] = "Target website was not reached due to an anti-bot or verification challenge"
+                if not result.get("recommendation"):
+                    result["recommendation"] = "Try again with a website that can be reached by the analysis browser"
+                result["error_message"] = None
             elif result.get("authenticity_score") is not None and not result.get("error_message"):
-                result["status"] = "success"
+                result["status"] = "completed"
             elif result.get("authenticity_score") is not None:
                 result["status"] = "partial"
             else:

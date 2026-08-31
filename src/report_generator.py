@@ -131,8 +131,8 @@ class ReportGenerator:
 
         Returns:
             Dictionary containing all required report fields per the specification:
-            - authenticity_score: Percentage string (e.g., "85.50%")
-            - fake_score: Percentage string (e.g., "14.50%")
+            - authenticity_score: Percentage string (e.g., "85.50%") or None if inconclusive
+            - fake_score: Percentage string (e.g., "14.50%") or None if inconclusive
             - confidence_indicator: "HIGH", "MEDIUM", or "LOW"
             - url: Target website URL
             - analysis_data: Serialized data dictionary
@@ -141,11 +141,16 @@ class ReportGenerator:
             - suspicious_indicators: List of suspicious factors if fake_score > 0.5
             - error_message: Error string or None
         """
-        scores_formatted = self.format_scores(result.authenticity_score, result.fake_score)
+        auth_formatted = None
+        fake_formatted = None
+        if result.authenticity_score is not None and result.fake_score is not None:
+            scores_formatted = self.format_scores(result.authenticity_score, result.fake_score)
+            auth_formatted = scores_formatted["authenticity_score"]
+            fake_formatted = scores_formatted["fake_score"]
 
         return {
-            "authenticity_score": scores_formatted["authenticity_score"],
-            "fake_score": scores_formatted["fake_score"],
+            "authenticity_score": auth_formatted,
+            "fake_score": fake_formatted,
             "confidence_indicator": str(result.confidence_indicator),
             "url": str(result.url),
             "analysis_data": self._serialize_analysis_data(result.analysis_data),
@@ -156,6 +161,7 @@ class ReportGenerator:
             ),
             "error_message": result.error_message,
         }
+
 
     def export_json(self, result: AnalysisResult) -> str:
         """

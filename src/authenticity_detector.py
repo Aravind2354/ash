@@ -357,9 +357,14 @@ class AuthenticityDetector:
                 )
 
                 # -------------------------------------------------------------
+                # -------------------------------------------------------------
                 # Handle Interstitial Case vs Normal Website Execution
                 # -------------------------------------------------------------
                 if interstitial_res.is_interstitial:
+                    end_dt = datetime.now(timezone.utc)
+                    end_str = end_dt.isoformat().replace("+00:00", "Z")
+                    timestamps["analysis_completion"] = end_str
+
                     diag_interstitial = [
                         f"[ANALYSIS] Proceeding to feature extraction: NO (Security/interstitial detected: {interstitial_res.reason})",
                     ]
@@ -376,9 +381,11 @@ class AuthenticityDetector:
                         ])
                     else:
                         diag_interstitial.extend([
-                            "[XGBOOST] Status: BYPASSED",
-                            "[XGBOOST] Prediction: INCONCLUSIVE (Target website not reached)",
-                            f"[HYBRID] Final result: INCONCLUSIVE (Target website not reached: {interstitial_res.reason})",
+                            "[INTERSTITIAL] Target website not reached",
+                            f"[INTERSTITIAL] Type: ANTI_BOT / VERIFICATION ({interstitial_res.interstitial_type})",
+                            "[XGBOOST] Status: NOT EXECUTED",
+                            "[XGBOOST] Prediction: NOT EXECUTED",
+                            "[HYBRID] Final result: INCONCLUSIVE",
                             "[RISK GATE] Triggered: Bot / Verification Challenge Interstitial",
                             "[FINAL] Authenticity: None",
                             "[FINAL] Fake/Phishing: None",
@@ -394,6 +401,9 @@ class AuthenticityDetector:
                         fake_score = 0.95
                         confidence = "HIGH"
                         risk_level = "PHISHING"
+                        classification = "PHISHING"
+                        xgboost_executed = False
+                        xgboost_probability = None
                         critical_indicators = [f"SECURITY_INTERSTITIAL: {ind}" for ind in interstitial_res.indicators]
                         top_factors = [
                             f"Security warning: {interstitial_res.reason}",
@@ -402,12 +412,17 @@ class AuthenticityDetector:
                         ]
                         suspicious_indicators = interstitial_res.indicators
                         error_msg = None
+                        reason = interstitial_res.reason
+                        recommendation = "Do not enter sensitive information on this website."
                     else:
                         # Bot / Verification challenge where target website was not reached
                         auth_score = None
                         fake_score = None
                         confidence = "LOW"
                         risk_level = "INCONCLUSIVE"
+                        classification = "INCONCLUSIVE"
+                        xgboost_executed = False
+                        xgboost_probability = None
                         critical_indicators = []
                         top_factors = [
                             "Target website was intercepted by a security challenge / interstitial",
@@ -415,7 +430,9 @@ class AuthenticityDetector:
                             "Target website content could not be verified"
                         ]
                         suspicious_indicators = [f"Security challenge intercepted target URL: {interstitial_res.reason}"]
-                        error_msg = f"Analysis inconclusive: Target website was not reached due to an interstitial challenge ({interstitial_res.reason})"
+                        error_msg = None
+                        reason = interstitial_res.reason or "Target website was not reached due to an anti-bot or verification challenge"
+                        recommendation = "Try again with a website that can be reached by the analysis browser"
 
                     if progress_callback and callable(progress_callback):
                         try:
@@ -444,12 +461,17 @@ class AuthenticityDetector:
                         critical_indicators=critical_indicators,
                     )
 
-                    if auth_score is None:
-                        report = self.report_generator.generate_partial_report(result)
-                    else:
-                        report = self.report_generator.generate_report(result)
+                    report = self.report_generator.generate_report(result)
 
+                    report["status"] = "completed"
+                    report["classification"] = classification
                     report["risk_level"] = risk_level
+                    report["confidence"] = confidence
+                    report["confidence_indicator"] = confidence
+                    report["xgboost_executed"] = xgboost_executed
+                    report["xgboost_probability"] = xgboost_probability
+                    report["reason"] = reason
+                    report["recommendation"] = recommendation
                     report["normalized_url"] = target_url
                     report["domain"] = domain_info.hostname
                     report["registrable_domain"] = domain_info.registrable_domain
@@ -458,6 +480,7 @@ class AuthenticityDetector:
                     report["reputation"] = reputation
                     report["redirects"] = []
                     report["critical_indicators"] = critical_indicators
+                    report["error_message"] = error_msg
 
                     if progress_callback and callable(progress_callback):
                         try:
@@ -524,12 +547,23 @@ class AuthenticityDetector:
                     critical_indicators=critical_indicators,
                 )
 
-                if auth_score is None:
+                if auth_score is None and risk_level != "INCONCLUSIVE":
                     report = self.report_generator.generate_partial_report(result)
                 else:
                     report = self.report_generator.generate_report(result)
 
+                ml_trained = getattr(getattr(self.ai_engine, "ml_model", None), "is_trained", False)
+                report["status"] = "completed"
+                report["classification"] = risk_level
                 report["risk_level"] = risk_level
+                report["confidence"] = confidence
+                report["confidence_indicator"] = confidence
+                report["xgboost_executed"] = True if (ml_trained and risk_level != "INCONCLUSIVE") else False
+                report["xgboost_probability"] = (
+                    round(fake_score, 4)
+                    if (fake_score is not None and isinstance(fake_score, (int, float)) and risk_level != "INCONCLUSIVE")
+                    else None
+                )
                 report["normalized_url"] = target_url
                 report["domain"] = domain_info.hostname
                 report["registrable_domain"] = domain_info.registrable_domain
@@ -538,6 +572,10 @@ class AuthenticityDetector:
                 report["reputation"] = reputation
                 report["redirects"] = []
                 report["critical_indicators"] = critical_indicators
+                if risk_level == "INCONCLUSIVE":
+                    report["reason"] = "Target website was not reached due to an anti-bot or verification challenge"
+                    report["recommendation"] = "Try again with a website that can be reached by the analysis browser"
+                    report["error_message"] = None
 
                 if progress_callback and callable(progress_callback):
                     try:

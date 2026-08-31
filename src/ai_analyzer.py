@@ -389,6 +389,61 @@ class AIAnalysisEngine:
             )
 
         # -------------------------------------------------------------
+        # Interstitial & Challenge Check (BEFORE Feature Extraction & XGBoost)
+        # -------------------------------------------------------------
+        from src.interstitial_detector import detect_interstitial
+        interstitial_res = detect_interstitial(
+            requested_url=url or "",
+            final_url=url or "",
+            page_title=page_title,
+            html_content=html,
+            structure_metrics=dom_metrics,
+        )
+        if interstitial_res.is_interstitial:
+            if interstitial_res.is_phishing_signal or interstitial_res.interstitial_type in ["PHISHING_WARNING", "SECURITY_BLOCKED"]:
+                self.logger.info(f"[INTERSTITIAL] Type: PHISHING_WARNING / SECURITY_BLOCKED: {interstitial_res.reason}")
+                self.logger.info("[XGBOOST] Status: BYPASSED")
+                self.logger.info("[XGBOOST] Prediction: BYPASSED (Security/Phishing Interstitial Warning)")
+                self.logger.info(f"[HYBRID] Final result: PHISHING / HIGH_RISK (Preserving security signal: {interstitial_res.reason})")
+                print(f"[INTERSTITIAL] Type: PHISHING_WARNING / SECURITY_BLOCKED", flush=True)
+                print(f"[XGBOOST] Prediction: BYPASSED", flush=True)
+                print(f"[HYBRID] Final result: PHISHING", flush=True)
+                return AnalysisScores(
+                    authenticity_score=0.05,
+                    fake_score=0.95,
+                    top_factors=[
+                        f"Security warning: {interstitial_res.reason}",
+                        "Website explicitly reported for suspected phishing or malicious activity",
+                        "Navigation blocked by security interstitial before reaching target",
+                    ],
+                    suspicious_indicators=interstitial_res.indicators,
+                    risk_level="PHISHING",
+                    critical_indicators=[f"SECURITY_INTERSTITIAL: {ind}" for ind in interstitial_res.indicators],
+                )
+            else:
+                self.logger.info(f"[INTERSTITIAL] Target website not reached")
+                self.logger.info(f"[INTERSTITIAL] Type: ANTI_BOT / VERIFICATION ({interstitial_res.interstitial_type})")
+                self.logger.info(f"[XGBOOST] Status: NOT EXECUTED")
+                self.logger.info(f"[XGBOOST] Prediction: NOT EXECUTED")
+                self.logger.info(f"[HYBRID] Final result: INCONCLUSIVE")
+                print(f"[INTERSTITIAL] Target website not reached", flush=True)
+                print(f"[INTERSTITIAL] Type: ANTI_BOT / VERIFICATION", flush=True)
+                print(f"[XGBOOST] Prediction: NOT EXECUTED", flush=True)
+                print(f"[HYBRID] Final result: INCONCLUSIVE", flush=True)
+                return AnalysisScores(
+                    authenticity_score=None,
+                    fake_score=None,
+                    top_factors=[
+                        "Target website was intercepted by a security challenge / interstitial",
+                        f"Challenge detected: {interstitial_res.reason}",
+                        "Target website content could not be verified",
+                    ],
+                    suspicious_indicators=[f"Security challenge intercepted target URL: {interstitial_res.reason}"],
+                    risk_level="INCONCLUSIVE",
+                    critical_indicators=[],
+                )
+
+        # -------------------------------------------------------------
         # [5] Feature Extraction, [6] XGBoost Inference & [7] Heuristics
         # -------------------------------------------------------------
         if progress_callback and callable(progress_callback):

@@ -327,14 +327,27 @@ function showResult(result) {
         }
     }
 
+    const classification = (result.classification || '').toUpperCase();
     const riskLevel = (result.risk_level || '').toUpperCase();
+    const taskStatus = (result.status || '').toLowerCase();
+    const isInconclusive = classification === 'INCONCLUSIVE' || riskLevel === 'INCONCLUSIVE' || taskStatus === 'inconclusive';
 
     if (alertSection && alertIcon && alertTitle && alertDescription) {
-        if (riskLevel === 'INCONCLUSIVE' || result.status === 'inconclusive') {
+        if (isInconclusive) {
             alertSection.className = 'security-alert-card inconclusive';
-            alertIcon.textContent = '❓';
-            alertTitle.textContent = 'ANALYSIS INCONCLUSIVE (TARGET NOT REACHED)';
-            alertDescription.textContent = 'The target website could not be reached because automated navigation was intercepted by an anti-bot or verification challenge. Do not classify this site as SAFE or PHISHING.';
+            alertIcon.textContent = '⚠️';
+            alertTitle.textContent = 'ANALYSIS INCONCLUSIVE — TARGET NOT REACHED';
+            const reasonText = result.reason || 'Website content unavailable';
+            const recText = result.recommendation || 'Try again with a website that can be reached by the analysis browser.';
+            alertDescription.innerHTML = `
+                <p style="margin-bottom: 8px;">The website presented an anti-bot or verification challenge, so the actual webpage could not be analyzed.</p>
+                <div style="margin-top: 6px; font-size: 0.95rem; line-height: 1.6;">
+                    <div><strong>XGBoost:</strong> Not executed</div>
+                    <div><strong>Reason:</strong> ${reasonText}</div>
+                    <div><strong>Classification:</strong> No Safe/Phishing verdict assigned</div>
+                    <div><strong>Recommendation:</strong> ${recText}</div>
+                </div>
+            `;
         } else if (result.status === 'failed' || (result.authenticity_score == null && result.fake_score == null)) {
             alertSection.className = 'security-alert-card failed';
             alertIcon.textContent = '❌';
@@ -385,7 +398,7 @@ function showResult(result) {
             topFactorsList.appendChild(li);
         });
 
-    } else if (result.error_message) {
+    } else if (result.error_message && !isInconclusive) {
 
         const li = document.createElement('li');
         li.textContent = 'No factors available due to incomplete analysis';
@@ -420,8 +433,8 @@ function showResult(result) {
     }
 
 
-    // If partial report with error_message, inform the user
-    if (result.error_message) {
+    // If partial report with error_message, inform the user (never show error for expected INCONCLUSIVE)
+    if (result.error_message && !isInconclusive) {
         showError(result.error_message);
     } else {
         hideError();

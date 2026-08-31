@@ -250,8 +250,67 @@ class TestAuthenticityDetectorInterstitialIntegration:
 
         report = await detector.analyze_website_async("https://protected-site.example.com/")
 
-        # Verify not false SAFE
+        # Verify not false SAFE and clean INCONCLUSIVE contract
         assert report["risk_level"] == "INCONCLUSIVE"
+        assert report["classification"] == "INCONCLUSIVE"
         assert report["confidence_indicator"] == "LOW"
         assert report["authenticity_score"] is None
-        assert "interstitial challenge" in report["error_message"]
+        assert report["fake_score"] is None
+        assert report["xgboost_executed"] is False
+        assert report["xgboost_probability"] is None
+        assert report["error_message"] is None
+        assert report["status"] == "completed"
+        assert "analysis_completion" in report["timestamps"]
+
+    @pytest.mark.asyncio
+    async def test_normal_website_executes_xgboost_and_full_pipeline(self):
+        """TEST 1 & 4: Normal accessible website proceeds through feature extraction and XGBoost."""
+        normal_html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>Amazon.in: Online Shopping India</title></head>
+        <body>
+            <header><h1>Welcome to Amazon</h1></header>
+            <main><p>Shop millions of products with fast delivery.</p></main>
+            <footer><p>© 1996-2026, Amazon.com, Inc. or its affiliates</p></footer>
+        </body>
+        </html>
+        """
+        mock_data = AnalysisData(
+            network=NetworkData(request_count=25, unique_domains=["amazon.in", "ssl-images-amazon.com"], protocol_distribution={"https": 25}, failed=False),
+            dom=DOMData(html_content=normal_html, structure_metrics={"total_elements": 150}, failed=False),
+            javascript=JavaScriptData(script_count=10, dom_modifications=5, external_api_calls=2, failed=False),
+            visual=VisualData(screenshot_path="/tmp/screen.png", layout_characteristics={}, failed=False),
+            ssl=SSLData(issuer="DigiCert Global Root CA", expiration_date="2027-12-31", chain_valid=True, failed=False),
+            categories_collected=5,
+        )
+
+        mock_sandbox = AsyncMock()
+        mock_sandbox.load_url.return_value = True
+        mock_sandbox.page = AsyncMock()
+        mock_sandbox.page.url = "https://www.amazon.in/"
+        mock_sandbox.page.title.return_value = "Amazon.in: Online Shopping India"
+
+        mock_sb_manager = AsyncMock()
+        mock_sb_manager.create_sandbox.return_value = mock_sandbox
+        mock_sb_manager.validate_isolation.return_value = (True, "")
+
+        mock_collector = AsyncMock()
+        mock_collector.collect_all.return_value = mock_data
+
+        detector = AuthenticityDetector(
+            sandbox_manager=mock_sb_manager,
+            data_collector=mock_collector
+        )
+
+        report = await detector.analyze_website_async("https://www.amazon.in/")
+
+        assert report["status"] == "completed"
+        assert report["risk_level"] != "INCONCLUSIVE"
+        assert report["classification"] != "INCONCLUSIVE"
+        assert report["authenticity_score"] is not None
+        assert report["fake_score"] is not None
+        assert report["xgboost_executed"] is True
+        assert report["xgboost_probability"] is not None
+        assert report["error_message"] is None
+
