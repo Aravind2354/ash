@@ -29,22 +29,37 @@ class TestIsolationOrchestratorIntegration:
     @pytest.fixture
     def docker_client(self):
         """Create Docker client."""
-        client = docker.from_env()
-        yield client
+        try:
+            client = docker.from_env(timeout=2)
+            client.ping()
+            yield client
+        except Exception as e:
+            pytest.skip(f"Docker not available: {e}")
         # Cleanup is handled by Docker client
 
     @pytest.fixture
     def hardened_container(self, docker_client):
         """Create a container with basic security properties for testing."""
-        # Note: Docker Desktop on Windows has limitations with procfs mounting
-        # This test verifies orchestration flow, not full hardening
+        image_name = 'website-authenticity-detector:test'
+        try:
+            docker_client.images.get(image_name)
+        except Exception:
+            image_name = 'python:3.11-slim'
+
         container = docker_client.containers.create(
-            'python:3.11-slim',
+            image_name,
             command='tail -f /dev/null',
             user='nobody',  # Non-root user
             network_mode='bridge',  # Bridge networking for controlled external access
             mem_limit='128m',  # Memory limit
             pids_limit=100,  # PID limit
+            cpu_quota=50000,
+            cpu_period=100000,
+            read_only=True,
+            security_opt=['no-new-privileges'],
+            cap_drop=['ALL'],
+            privileged=False,
+            tmpfs={'/tmp': 'size=64m,nosuid,nodev,noexec', '/analysis/temp': 'size=64m,nosuid,nodev,noexec'},
             detach=True
         )
         container.start()
@@ -136,3 +151,27 @@ class TestIsolationOrchestratorIntegration:
         # Verify we don't use host PID mode
         # This is a safety check for the test itself
         pass  # Test design ensures no host PID mode is used
+
+    def test_in_container_probe_execution_hardened_detector_image(self, docker_client):
+        """Test that in-container probe runner executes and validates on detector image."""
+        try:
+            docker_client.images.get('website-authenticity-detector:test')
+        except Exception:
+            pytest.skip("website-authenticity-detector:test image not found")
+
+        from src.container_manager import ContainerManager
+        from src.violation_monitor import ViolationMonitor
+
+        cm = ContainerManager(violation_monitor=ViolationMonitor())
+        container = cm.create_container(image='website-authenticity-detector:test')
+        try:
+            assert container is not None
+            assert cm._is_validated is True
+            assessment = cm.isolation_orchestrator.validate_isolation(container)
+            assert assessment.valid is True
+            assert assessment.assessment_type == "PASS"
+            assert len(assessment.evidence.filesystem_evidence) > 0
+            assert len(assessment.evidence.process_evidence) > 0
+            assert len(assessment.evidence.network_evidence) > 0
+        finally:
+            cm.cleanup()

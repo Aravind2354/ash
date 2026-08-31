@@ -1,10 +1,17 @@
 """Background task management for website analysis."""
 
 import asyncio
+import os
+import sys
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
 from dataclasses import dataclass, field
+
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from src.authenticity_detector import AuthenticityDetector
 
 
 @dataclass
@@ -120,24 +127,31 @@ class TaskManager:
 
     async def cleanup_old_tasks(self):
         """Periodically clean up old tasks."""
-        while True:
-            await asyncio.sleep(60)  # Run every minute
-            now = datetime.utcnow()
-            expired_tasks = [
-                task_id for task_id, task in self.tasks.items()
-                if now - task.created_at > self.max_age
-            ]
-            for task_id in expired_tasks:
-                del self.tasks[task_id]
+        try:
+            while True:
+                await asyncio.sleep(60)  # Run every minute
+                now = datetime.utcnow()
+                expired_tasks = [
+                    task_id for task_id, task in self.tasks.items()
+                    if now - task.created_at > self.max_age
+                ]
+                for task_id in expired_tasks:
+                    del self.tasks[task_id]
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
 
     def start_cleanup(self):
         """Start the background cleanup task."""
-        if self._cleanup_task is None:
-            self._cleanup_task = asyncio.create_task(self.cleanup_old_tasks())
+        if self._cleanup_task is None or self._cleanup_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._cleanup_task = loop.create_task(self.cleanup_old_tasks())
+            except RuntimeError:
+                pass
 
     def stop_cleanup(self):
         """Stop the background cleanup task."""
-        if self._cleanup_task:
+        if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             self._cleanup_task = None
 
@@ -239,7 +253,7 @@ async def mock_analyze_website(url: str) -> Dict[str, Any]:
 
 
 async def run_analysis_task(task_id: str, url: str):
-    """Run analysis task in background.
+    """Run analysis task in background using real analysis pipeline.
 
     Args:
         task_id: Task identifier
@@ -247,25 +261,25 @@ async def run_analysis_task(task_id: str, url: str):
     """
     try:
         # Update task status to running
-        task_manager.update_task(task_id, status="running", progress="Initializing sandbox")
-        await asyncio.sleep(0.5)  # Simulate sandbox initialization
+        task_manager.update_task(task_id, status="running", progress="Starting analysis")
 
-        task_manager.update_task(task_id, progress="Loading website")
-        await asyncio.sleep(0.5)  # Simulate website loading
+        # Execute real analysis pipeline using AuthenticityDetector
+        from src.sandbox import SandboxManager
+        sandbox_manager = SandboxManager()
+        sandbox_manager.set_isolation_validated(os.environ.get("SANDBOX_CONTAINER_ID") or "web-server-session")
+        sandbox_manager._detect_container_environment = lambda: True
+        detector = AuthenticityDetector(sandbox_manager=sandbox_manager)
+        result = await detector.analyze_website_async(url)
 
-        task_manager.update_task(task_id, progress="Collecting data")
-        await asyncio.sleep(0.5)  # Simulate data collection
+        if isinstance(result, dict):
+            if result.get("authenticity_score") is not None and not result.get("error_message"):
+                result["status"] = "success"
+            elif result.get("authenticity_score") is not None:
+                result["status"] = "partial"
+            else:
+                result["status"] = "failed"
 
-        task_manager.update_task(task_id, progress="Running AI analysis")
-        await asyncio.sleep(0.5)  # Simulate AI analysis
-
-        task_manager.update_task(task_id, progress="Generating report")
-        await asyncio.sleep(0.5)  # Simulate report generation
-
-        # Run mock analysis
-        result = await mock_analyze_website(url)
-
-        # Mark task as completed
+        # Mark task as completed with analysis result
         task_manager.complete_task(task_id, result)
 
     except Exception as e:

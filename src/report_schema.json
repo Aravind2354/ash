@@ -59,14 +59,39 @@
       "maxItems": 3,
       "description": "Top 3 factors influencing authenticity score"
     },
-    "suspicious_indicators": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Data elements contributing to Fake_Score > 0.5"
-    },
     "error_message": {
       "type": ["string", "null"],
       "description": "Error message if analysis failed"
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["SAFE", "SUSPICIOUS", "HIGH_RISK", "PHISHING", "INCONCLUSIVE", "FAILED"],
+      "description": "Standardized phishing/fake-website risk verdict"
+    },
+    "normalized_url": {
+      "type": ["string", "null"]
+    },
+    "domain": {
+      "type": ["string", "null"]
+    },
+    "registrable_domain": {
+      "type": ["string", "null"]
+    },
+    "brand_detected": {
+      "type": ["string", "null"]
+    },
+    "brand_domain_match": {
+      "type": ["boolean", "null"]
+    },
+    "reputation": {
+      "type": ["object", "null"]
+    },
+    "redirects": {
+      "type": ["array", "null"]
+    },
+    "critical_indicators": {
+      "type": "array",
+      "items": { "type": "string" }
     }
   }
 }

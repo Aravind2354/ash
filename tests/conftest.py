@@ -15,7 +15,7 @@ def sandbox_container_id():
     # Check if Docker is available
     try:
         import docker
-        client = docker.from_env()
+        client = docker.from_env(timeout=2)
         client.ping()
         container = client.containers.create(
             "python:3.11-slim",

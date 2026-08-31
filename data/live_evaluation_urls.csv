@@ -1,0 +1,16 @@
+url,expected_label
+https://www.google.com,0
+https://www.microsoft.com,0
+https://www.amazon.com,0
+https://allegro.pl,0
+https://www.wikipedia.org,0
+https://www.python.org,0
+https://github.com,0
+https://example.com,0
+http://allegro.oferta7678678564.pl,1
+https://paypal-security-verification-portal.xyz,1
+https://login.microsoftonline.security-auth.top,1
+http://192.0.2.1/login,1
+https://xn--pple-43d.com,1
+https://santander-autoryzacja-klienta.buzz,1
+http://inpost-paczka-status-7812903.cam,1

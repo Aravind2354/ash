@@ -22,7 +22,7 @@ from src.process_probes import ProcessProbes
 def docker_client():
     """Create a Docker client for integration tests."""
     try:
-        client = docker.from_env()
+        client = docker.from_env(timeout=2)
         # Verify Docker is available
         client.ping()
         return client

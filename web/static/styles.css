@@ -158,6 +158,79 @@ main {
     font-size: 1.8rem;
 }
 
+.security-alert-card {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 20px;
+    border-radius: 10px;
+    margin-bottom: 25px;
+    border-left: 6px solid;
+    transition: all 0.3s ease;
+}
+
+.security-alert-card.safe {
+    background: #eafaf1;
+    border-left-color: #28a745;
+    color: #155724;
+}
+
+.security-alert-card.suspicious {
+    background: #fff8e1;
+    border-left-color: #ff9800;
+    color: #856404;
+}
+
+.security-alert-card.high-risk {
+    background: #fde8e8;
+    border-left-color: #dc3545;
+    color: #721c24;
+}
+
+.security-alert-card.phishing {
+    background: #ffebe9;
+    border-left-color: #cf222e;
+    color: #82071e;
+    box-shadow: 0 0 15px rgba(207, 34, 46, 0.3);
+    border: 2px solid #cf222e;
+    border-left-width: 8px;
+}
+
+.security-alert-card.inconclusive {
+    background: #f0f4f8;
+    border-left-color: #6c757d;
+    color: #495057;
+}
+
+.security-alert-card.partial {
+    background: #fff3cd;
+    border-left-color: #fd7e14;
+    color: #664d03;
+}
+
+.security-alert-card.failed {
+    background: #f8d7da;
+    border-left-color: #b02a37;
+    color: #842029;
+}
+
+.security-alert-card .alert-icon {
+    font-size: 2.2rem;
+    flex-shrink: 0;
+}
+
+.security-alert-card h3 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin-bottom: 5px;
+}
+
+.security-alert-card p {
+    font-size: 0.95rem;
+    margin: 0;
+    line-height: 1.4;
+}
+
 .url-display {
     background: white;
     padding: 15px;

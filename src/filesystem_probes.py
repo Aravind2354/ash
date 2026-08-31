@@ -284,6 +284,14 @@ class FilesystemProbes:
             approved_tmpfs_found = []
             unexpected_mounts = []
             
+            # Standard allowed container mount types
+            allowed_fs_types = (
+                'proc', 'sysfs', 'devtmpfs', 'devpts', 'cgroup',
+                'cgroup2', 'mqueue', 'overlay', 'tmpfs', 'shm'
+            )
+            # Standard container runtime configuration files
+            docker_container_files = {'/etc/resolv.conf', '/etc/hostname', '/etc/hosts'}
+
             for entry in mount_entries:
                 if entry['mount_point'] in self.APPROVED_TMPFS_DESTINATIONS:
                     if entry['type'] == 'tmpfs':
@@ -294,14 +302,17 @@ class FilesystemProbes:
                             'type': entry['type'],
                             'reason': 'Approved destination has wrong filesystem type'
                         })
+                elif entry['mount_point'] in docker_container_files:
+                    # Standard Docker container network configuration files
+                    continue
                 elif entry['mount_point'].startswith('/'):
                     # Check for other mounted filesystems at root level
-                    # Allow expected filesystem types
-                    if entry['type'] not in ('proc', 'sysfs', 'devtmpfs', 'cgroup', 'overlay', 'tmpfs'):
+                    # Allow expected container pseudofilesystem types
+                    if entry['type'] not in allowed_fs_types:
                         unexpected_mounts.append({
                             'mount_point': entry['mount_point'],
                             'type': entry['type'],
-                            'reason': 'Unexpected root-level mount'
+                            'reason': f'Unexpected root-level mount (type: {entry["type"]})'
                         })
             
             return ProbeResult(

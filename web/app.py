@@ -1,5 +1,12 @@
 """FastAPI application for Website Authenticity Detector web layer."""
 
+import asyncio
+import sys
+
+# Playwright requires a Windows event loop that supports subprocesses.
+if sys.platform == 'win32':
+     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +21,11 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
     # Startup
     task_manager.start_cleanup()
-    yield
-    # Shutdown
-    task_manager.stop_cleanup()
+    try:
+        yield
+    finally:
+        # Shutdown
+        task_manager.stop_cleanup()
 
 
 # Create FastAPI application

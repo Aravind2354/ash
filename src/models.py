@@ -141,6 +141,15 @@ class AnalysisResult:
         top_factors: Top 3 factors that influenced the authenticity score
         suspicious_indicators: Data elements contributing to Fake_Score > 0.5
         error_message: Error message if analysis failed (None if successful)
+        risk_level: Standardized verdict ("SAFE", "SUSPICIOUS", "HIGH_RISK", "PHISHING", "INCONCLUSIVE", "FAILED")
+        normalized_url: Normalized target URL
+        domain: Extracted hostname
+        registrable_domain: Root/registrable domain
+        brand_detected: Claimed or detected brand name
+        brand_domain_match: Whether domain is authorized for detected brand
+        reputation: Threat intelligence reputation status and provider data
+        redirects: Redirect chain history
+        critical_indicators: High-severity security threat indicators
     """
     authenticity_score: float
     fake_score: float
@@ -151,6 +160,15 @@ class AnalysisResult:
     top_factors: List[str]
     suspicious_indicators: List[str]
     error_message: Optional[str] = None
+    risk_level: str = "INCONCLUSIVE"
+    normalized_url: Optional[str] = None
+    domain: Optional[str] = None
+    registrable_domain: Optional[str] = None
+    brand_detected: Optional[str] = None
+    brand_domain_match: Optional[bool] = None
+    reputation: Optional[Dict[str, any]] = None
+    redirects: Optional[List[Dict[str, any]]] = None
+    critical_indicators: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -163,8 +181,13 @@ class AnalysisScores:
         fake_score: Probability that the website is fraudulent (0.0-1.0)
         top_factors: List of top factors that influenced the score
         suspicious_indicators: List of elements contributing to Fake_Score > 0.5
+        risk_level: Standardized verdict ("SAFE", "SUSPICIOUS", "HIGH_RISK", "PHISHING")
+        critical_indicators: High-severity security threat indicators
     """
     authenticity_score: float
     fake_score: float
     top_factors: List[str] = field(default_factory=list)
     suspicious_indicators: List[str] = field(default_factory=list)
+    risk_level: str = "SAFE"
+    critical_indicators: List[str] = field(default_factory=list)
+

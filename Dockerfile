@@ -49,6 +49,8 @@ RUN mkdir -p /analysis /results && \
     chown -R analyzer:analyzer /analysis /results
 
 # Switch to non-root user
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/analyzer/.cache/ms-playwright
+ENV HOME=/home/analyzer
 USER analyzer
 WORKDIR /analysis
 

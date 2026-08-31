@@ -188,7 +188,7 @@ def test_docker_environment_connectivity():
     try:
         import docker
 
-        client = docker.from_env()
+        client = docker.from_env(timeout=2)
         client.ping()
     except Exception as e:
         pytest.skip(f"Docker daemon not reachable/available: {e}")

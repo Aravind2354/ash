@@ -28,8 +28,12 @@ class TestNetworkProbesIntegration:
     @pytest.fixture
     def docker_client(self):
         """Create Docker client."""
-        client = docker.from_env()
-        yield client
+        try:
+            client = docker.from_env(timeout=2)
+            client.ping()
+            yield client
+        except Exception as e:
+            pytest.skip(f"Docker not available: {e}")
         # Cleanup is handled by Docker client
     
     @pytest.fixture

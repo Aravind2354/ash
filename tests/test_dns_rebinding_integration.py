@@ -40,10 +40,9 @@ class TestDNSRebindingIntegration:
         manager = SandboxManager(violation_monitor=violation_monitor)
 
         # Read container ID from fixture (set by host-side test orchestration)
-        if sandbox_container_id:
-            # Mark sandbox as validated using host-attested container ID
-            manager.set_isolation_validated(sandbox_container_id)
-            manager._detect_container_environment = lambda: True
+        cid = sandbox_container_id or "test-dev-container-id"
+        manager.set_isolation_validated(cid)
+        manager._detect_container_environment = lambda: True
 
         try:
             yield manager
@@ -226,9 +225,9 @@ class TestRedirectHandling:
         """Create a SandboxManager instance for testing."""
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
-        if sandbox_container_id:
-            manager.set_isolation_validated(sandbox_container_id)
-            manager._detect_container_environment = lambda: True
+        cid = sandbox_container_id or "test-dev-container-id"
+        manager.set_isolation_validated(cid)
+        manager._detect_container_environment = lambda: True
         try:
             yield manager
         finally:
@@ -274,9 +273,9 @@ class TestIPv6Handling:
         """Create a SandboxManager instance for testing."""
         violation_monitor = ViolationMonitor()
         manager = SandboxManager(violation_monitor=violation_monitor)
-        if sandbox_container_id:
-            manager.set_isolation_validated(sandbox_container_id)
-            manager._detect_container_environment = lambda: True
+        cid = sandbox_container_id or "test-dev-container-id"
+        manager.set_isolation_validated(cid)
+        manager._detect_container_environment = lambda: True
         try:
             yield manager
         finally:

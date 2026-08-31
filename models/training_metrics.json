@@ -1,0 +1,62 @@
+{
+  "accuracy": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1_score": 1.0,
+  "roc_auc": 1.0,
+  "confusion_matrix": [
+    [
+      451,
+      0
+    ],
+    [
+      0,
+      450
+    ]
+  ],
+  "n_train": 4199,
+  "n_test": 901,
+  "top_features": [
+    [
+      "dom_element_count",
+      0.3116358518600464
+    ],
+    [
+      "network_https_ratio",
+      0.2129904180765152
+    ],
+    [
+      "brand_domain_mismatch",
+      0.07981212437152863
+    ],
+    [
+      "js_dom_modifications",
+      0.06443233788013458
+    ],
+    [
+      "viewport_width",
+      0.05412662774324417
+    ],
+    [
+      "network_request_count",
+      0.04962718486785889
+    ],
+    [
+      "url_length",
+      0.0326223149895668
+    ],
+    [
+      "image_count",
+      0.03063829243183136
+    ],
+    [
+      "is_suspicious_tld",
+      0.030567733570933342
+    ],
+    [
+      "login_keyword_count",
+      0.029948294162750244
+    ]
+  ],
+  "model_path": "C:\\Users\\honey\\fakewebsite\\models\\xgboost_phishing_model.json"
+}

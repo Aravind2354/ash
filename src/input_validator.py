@@ -39,6 +39,15 @@ class InputValidator:
     
     # Special characters that need percent-encoding to prevent injection (Requirement 9.6)
     SPECIAL_CHARS = [';', '&', '|', '`', '$', '(', ')', '<', '>', '"', "'", '\\', '\n', '\r', '\t']
+
+    # Known brand and domain names that cannot be used as standalone single-word hostnames without a valid TLD
+    NON_TLD_SINGLE_WORD_HOSTS = {
+        "google", "microsoft", "apple", "amazon", "paypal", "netflix", "facebook",
+        "instagram", "whatsapp", "twitter", "linkedin", "ebay", "allegro", "yahoo",
+        "bing", "github", "gitlab", "reddit", "youtube", "twitch", "spotify",
+        "adobe", "dropbox", "shopify", "stripe", "revolut", "wise", "coinbase",
+        "binance", "kraken", "chase", "citibank", "wellsfargo", "barclays", "hsbc",
+    }
     
     def __init__(self):
         """Initialize the InputValidator."""
@@ -129,11 +138,11 @@ class InputValidator:
             return False, f"URL validation failed: cannot parse protocol - {str(e)}"
     
     def _validate_host(self, url: str) -> Tuple[bool, Optional[str]]:
-        """Validate host is not a private IP address.
+        """Validate host is not a private IP address and is not an invalid single-word hostname.
         
         Validates: Requirement 9.4
         Rejects: localhost, 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 
-                 192.168.0.0/16, fc00::/7
+                 192.168.0.0/16, fc00::/7, and single-word hostnames without valid TLD.
         
         Args:
             url: The URL string to validate
@@ -169,14 +178,69 @@ class InputValidator:
                             return False, f"URL validation failed: private IP address {host} is not allowed"
                 
             except ValueError:
-                # Not an IP address, it's a hostname - that's fine
+                # Not an IP address, so treat it as a hostname.
                 pass
+
+            # Check for single-word hostnames without TLD (Requirement Scenario N)
+            clean_host = host.lower().rstrip('.')
+            if '.' not in clean_host and clean_host in self.NON_TLD_SINGLE_WORD_HOSTS:
+                return False, f"URL validation failed: INVALID_URL - single-word hostname '{host}' lacks a top-level domain"
             
             return True, None
             
         except Exception as e:
             return False, f"URL validation failed: cannot validate host - {str(e)}"
     
+    @staticmethod
+    def normalize_url(url: str) -> str:
+        """Normalize a URL for safe and consistent analysis.
+        
+        - Trims whitespace
+        - Defaults to http:// if scheme is missing
+        - Normalizes scheme and host to lowercase
+        - Encodes IDN/punycode if required
+        - Preserves path, query, and fragment
+        """
+        if not url or not isinstance(url, str):
+            return ""
+        
+        trimmed = url.strip()
+        if not trimmed:
+            return ""
+            
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9+\-.]*://", trimmed):
+            trimmed = f"http://{trimmed}"
+            
+        try:
+            parsed = urlparse(trimmed)
+            scheme = (parsed.scheme or "http").lower()
+            netloc = (parsed.netloc or "").lower()
+            
+            # IDN / Punycode normalization for host
+            host_part = parsed.hostname or ""
+            try:
+                encoded_host = host_part.encode('idna').decode('ascii')
+                if parsed.port:
+                    netloc = f"{encoded_host}:{parsed.port}"
+                else:
+                    netloc = encoded_host
+            except Exception:
+                pass
+                
+            path = parsed.path
+            query = parsed.query
+            fragment = parsed.fragment
+            
+            normalized = f"{scheme}://{netloc}{path}"
+            if query:
+                normalized += f"?{query}"
+            if fragment:
+                normalized += f"#{fragment}"
+                
+            return normalized
+        except Exception:
+            return trimmed
+
     def _validate_length(self, url: str) -> bool:
         """Validate URL length does not exceed maximum.
         

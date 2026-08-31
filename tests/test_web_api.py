@@ -1,6 +1,7 @@
 """Tests for web API layer."""
 
 import pytest
+from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 from web.app import app
 from web.tasks import task_manager
@@ -19,7 +20,8 @@ class TestWebAPI:
         assert "text/html" in response.headers["content-type"]
         assert "Website Authenticity Detector" in response.text
 
-    def test_post_analyze_valid_url(self):
+    @patch("web.routes.run_analysis_task")
+    def test_post_analyze_valid_url(self, mock_run):
         """Test POST /analyze with a valid URL."""
         response = client.post(
             "/api/analyze",
@@ -177,7 +179,8 @@ class TestWebAPI:
         data = response.json()
         assert data["status"] == "healthy"
 
-    def test_api_rejects_arbitrary_parameters(self):
+    @patch("web.routes.run_analysis_task")
+    def test_api_rejects_arbitrary_parameters(self, mock_run):
         """Test that API only accepts URL parameter."""
         # Try to send additional parameters that could control security settings
         response = client.post(

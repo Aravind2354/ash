@@ -5,6 +5,7 @@ configuration validation with runtime evidence from filesystem, process,
 and network probes to produce comprehensive security assessments.
 """
 
+import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timezone
@@ -487,3 +488,83 @@ class TestMalformedResults:
                 assert assessment.valid is False
                 assert assessment.assessment_type == "FAIL"
                 assert "filesystem_rootfs_readonly_failed" in assessment.security_critical_failures
+
+
+class TestInContainerProbeRunner:
+    """Test host-to-container probe runner execution bridge."""
+
+    def test_in_container_exec_success(self, orchestrator):
+        """Test successful execution and deserialization of container probes."""
+        from src.probe_runner import PROBE_DELIMITER_START, PROBE_DELIMITER_END
+
+        payload = {
+            "filesystem": {
+                "rootfs_readonly": {"probe_name": "rootfs_readonly", "passed": True, "observed_value": "ro", "expected_condition": "ro", "error": None},
+                "tmpfs_writability": {"probe_name": "tmpfs_writability", "passed": True, "observed_value": "ok", "expected_condition": "writable", "error": None}
+            },
+            "process": {
+                "pid_namespace_evidence": {"probe_name": "pid_namespace_evidence", "passed": True, "observed_value": "isolated", "expected_condition": "isolated", "error": None},
+                "process_visibility": {"probe_name": "process_visibility", "passed": True, "observed_value": "ok", "expected_condition": "ok", "error": None}
+            },
+            "network": {
+                "network_namespace_evidence": {"probe_name": "network_namespace_evidence", "passed": True, "observed_value": "isolated", "expected_condition": "isolated", "error": None},
+                "network_interface_evidence": {"probe_name": "network_interface_evidence", "passed": True, "observed_value": "ok", "expected_condition": "ok", "error": None}
+            }
+        }
+        output_str = f"Container logs\n{PROBE_DELIMITER_START}\n{json.dumps(payload)}\n{PROBE_DELIMITER_END}\nDone"
+
+        mock_container = Mock()
+        mock_container.id = "test_cont_123"
+        mock_exec_res = Mock()
+        mock_exec_res.exit_code = 0
+        mock_exec_res.output = output_str.encode('utf-8')
+        mock_container.exec_run.return_value = mock_exec_res
+
+        evidence = EvidenceAggregate()
+        orchestrator._collect_container_evidence(mock_container, evidence)
+
+        mock_container.exec_run.assert_called_once_with(
+            ["python", "-m", "src.probe_runner"],
+            workdir="/analysis",
+            stdout=True,
+            stderr=True,
+            demux=False
+        )
+        assert len(evidence.filesystem_evidence) == 2
+        assert evidence.filesystem_evidence["rootfs_readonly"].passed is True
+        assert len(evidence.process_evidence) == 2
+        assert evidence.process_evidence["pid_namespace_evidence"].passed is True
+        assert len(evidence.network_evidence) == 2
+        assert evidence.network_evidence["network_namespace_evidence"].passed is True
+        assert len(evidence.evidence_collection_errors) == 0
+
+    def test_in_container_exec_failure_exit_code(self, orchestrator):
+        """Test handling when in-container probe runner exits with non-zero code."""
+        mock_container = Mock()
+        mock_container.id = "test_cont_123"
+        mock_exec_res = Mock()
+        mock_exec_res.exit_code = 1
+        mock_exec_res.output = b"Execution crashed in container"
+        mock_container.exec_run.return_value = mock_exec_res
+
+        evidence = EvidenceAggregate()
+        orchestrator._collect_container_evidence(mock_container, evidence)
+
+        assert len(evidence.evidence_collection_errors) > 0
+        assert any("in_container_probe_runner_exit_code_1" in err for err in evidence.evidence_collection_errors)
+
+    def test_in_container_exec_malformed_output(self, orchestrator):
+        """Test handling when in-container probe runner returns output without delimiter."""
+        mock_container = Mock()
+        mock_container.id = "test_cont_123"
+        mock_exec_res = Mock()
+        mock_exec_res.exit_code = 0
+        mock_exec_res.output = b"Random unexpected output"
+        mock_container.exec_run.return_value = mock_exec_res
+
+        evidence = EvidenceAggregate()
+        orchestrator._collect_container_evidence(mock_container, evidence)
+
+        assert len(evidence.evidence_collection_errors) > 0
+        assert any("invalid_probe_output_format" in err for err in evidence.evidence_collection_errors)
+

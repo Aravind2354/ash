@@ -21,6 +21,7 @@ This orchestrator preserves the distinction between:
 """
 
 import logging
+import json
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
@@ -93,7 +94,14 @@ class IsolationOrchestrator:
         'network': ['network_namespace_evidence', 'network_interface_evidence']
     }
 
-    def __init__(self):
+    def __init__(
+        self,
+        container_validator: Optional[Any] = None,
+        filesystem_probes: Optional[Any] = None,
+        process_probes: Optional[Any] = None,
+        network_probes: Optional[Any] = None,
+        docker_client: Optional[Any] = None,
+    ):
         """Initialize the IsolationOrchestrator."""
         self.logger = get_logger(__name__)
 
@@ -104,10 +112,10 @@ class IsolationOrchestrator:
             from src.process_probes import ProcessProbes
             from src.network_probes import NetworkProbes
 
-            self.container_validator = ContainerValidator()
-            self.filesystem_probes = FilesystemProbes()
-            self.process_probes = ProcessProbes()
-            self.network_probes = NetworkProbes()
+            self.container_validator = container_validator or ContainerValidator(docker_client=docker_client)
+            self.filesystem_probes = filesystem_probes or FilesystemProbes()
+            self.process_probes = process_probes or ProcessProbes()
+            self.network_probes = network_probes or NetworkProbes()
 
         except ImportError as e:
             self.logger.error(f"Failed to import required modules: {e}")
@@ -158,35 +166,12 @@ class IsolationOrchestrator:
                 error_message=f"Container configuration validation failed: {e}"
             )
 
-        # Step 2: Collect runtime evidence from all probes
+        # Step 2: Collect runtime evidence from all probes (inside container if available)
         evidence = EvidenceAggregate(
             container_validation=container_validation,
             timestamp=datetime.now(timezone.utc)
         )
-
-        # Collect filesystem evidence
-        try:
-            evidence.filesystem_evidence = self.filesystem_probes.run_all_probes()
-            self.logger.info(f"Filesystem evidence collected: {len(evidence.filesystem_evidence)} probes")
-        except Exception as e:
-            self.logger.error(f"Error collecting filesystem evidence: {e}", exc_info=True)
-            evidence.evidence_collection_errors.append(f"filesystem_evidence: {e}")
-
-        # Collect process evidence
-        try:
-            evidence.process_evidence = self.process_probes.run_all_probes()
-            self.logger.info(f"Process evidence collected: {len(evidence.process_evidence)} probes")
-        except Exception as e:
-            self.logger.error(f"Error collecting process evidence: {e}", exc_info=True)
-            evidence.evidence_collection_errors.append(f"process_evidence: {e}")
-
-        # Collect network evidence
-        try:
-            evidence.network_evidence = self.network_probes.run_all_probes()
-            self.logger.info(f"Network evidence collected: {len(evidence.network_evidence)} probes")
-        except Exception as e:
-            self.logger.error(f"Error collecting network evidence: {e}", exc_info=True)
-            evidence.evidence_collection_errors.append(f"network_evidence: {e}")
+        self._collect_container_evidence(container, evidence)
 
         # Step 3: Check consistency between configuration and runtime evidence
         evidence.config_runtime_consistent = self._check_consistency(evidence)
@@ -350,3 +335,106 @@ class IsolationOrchestrator:
             warnings=warnings,
             error_message=" ; ".join(critical_failures) if critical_failures else None
         )
+
+    def _collect_container_evidence(self, container: Any, evidence: EvidenceAggregate) -> None:
+        """Collect runtime evidence by executing probe_runner inside the container.
+
+        If container has `exec_run`, it executes `python -m src.probe_runner` inside
+        the running container, parses the JSON evidence, and reconstructs ProbeResult objects.
+        If container does not support `exec_run` (e.g., in unit tests with mock containers),
+        it falls back to local probe runners to maintain test compatibility.
+        """
+        if hasattr(container, "exec_run") and callable(container.exec_run):
+            try:
+                exec_result = container.exec_run(
+                    ["python", "-m", "src.probe_runner"],
+                    workdir="/analysis",
+                    stdout=True,
+                    stderr=True,
+                    demux=False
+                )
+
+                exit_code = getattr(exec_result, 'exit_code', 0)
+                output_bytes = getattr(exec_result, 'output', b'')
+                output_str = output_bytes.decode('utf-8', errors='replace') if isinstance(output_bytes, bytes) else str(output_bytes)
+
+                if exit_code != 0:
+                    self.logger.error(f"In-container probe runner failed with exit code {exit_code}: {output_str}")
+                    evidence.evidence_collection_errors.append(f"in_container_probe_runner_exit_code_{exit_code}: {output_str}")
+
+                from src.probe_runner import PROBE_DELIMITER_START, PROBE_DELIMITER_END
+                if PROBE_DELIMITER_START in output_str and PROBE_DELIMITER_END in output_str:
+                    start_idx = output_str.find(PROBE_DELIMITER_START) + len(PROBE_DELIMITER_START)
+                    end_idx = output_str.find(PROBE_DELIMITER_END, start_idx)
+                    json_str = output_str[start_idx:end_idx].strip()
+                    payload = json.loads(json_str)
+
+                    from src.filesystem_probes import ProbeResult as FSProbeResult
+                    from src.process_probes import ProbeResult as ProcProbeResult
+                    from src.network_probes import ProbeResult as NetProbeResult
+
+                    fs_dict = payload.get("filesystem", {})
+                    for k, v in fs_dict.items():
+                        evidence.filesystem_evidence[k] = FSProbeResult(
+                            probe_name=v.get('probe_name', k),
+                            passed=bool(v.get('passed', False)),
+                            observed_value=v.get('observed_value'),
+                            expected_condition=v.get('expected_condition', ''),
+                            error=v.get('error')
+                        )
+
+                    proc_dict = payload.get("process", {})
+                    for k, v in proc_dict.items():
+                        evidence.process_evidence[k] = ProcProbeResult(
+                            probe_name=v.get('probe_name', k),
+                            passed=bool(v.get('passed', False)),
+                            observed_value=v.get('observed_value'),
+                            expected_condition=v.get('expected_condition', ''),
+                            error=v.get('error')
+                        )
+
+                    net_dict = payload.get("network", {})
+                    for k, v in net_dict.items():
+                        evidence.network_evidence[k] = NetProbeResult(
+                            probe_name=v.get('probe_name', k),
+                            passed=bool(v.get('passed', False)),
+                            observed_value=v.get('observed_value'),
+                            expected_condition=v.get('expected_condition', ''),
+                            error=v.get('error')
+                        )
+
+                    self.logger.info(
+                        f"In-container evidence collected: {len(evidence.filesystem_evidence)} fs, "
+                        f"{len(evidence.process_evidence)} proc, {len(evidence.network_evidence)} net probes"
+                    )
+                    return
+                else:
+                    self.logger.error(f"In-container probe runner returned invalid output format: {output_str}")
+                    evidence.evidence_collection_errors.append(f"invalid_probe_output_format: {output_str[:200]}")
+                    return
+            except Exception as e:
+                self.logger.error(f"Error executing in-container probe runner: {e}", exc_info=True)
+                evidence.evidence_collection_errors.append(f"in_container_exec_error: {e}")
+                return
+
+        # Fallback to local probe instances (e.g., for mock containers in unit tests)
+        try:
+            evidence.filesystem_evidence = self.filesystem_probes.run_all_probes()
+            self.logger.info(f"Filesystem evidence collected: {len(evidence.filesystem_evidence)} probes")
+        except Exception as e:
+            self.logger.error(f"Error collecting filesystem evidence: {e}", exc_info=True)
+            evidence.evidence_collection_errors.append(f"filesystem_evidence: {e}")
+
+        try:
+            evidence.process_evidence = self.process_probes.run_all_probes()
+            self.logger.info(f"Process evidence collected: {len(evidence.process_evidence)} probes")
+        except Exception as e:
+            self.logger.error(f"Error collecting process evidence: {e}", exc_info=True)
+            evidence.evidence_collection_errors.append(f"process_evidence: {e}")
+
+        try:
+            evidence.network_evidence = self.network_probes.run_all_probes()
+            self.logger.info(f"Network evidence collected: {len(evidence.network_evidence)} probes")
+        except Exception as e:
+            self.logger.error(f"Error collecting network evidence: {e}", exc_info=True)
+            evidence.evidence_collection_errors.append(f"network_evidence: {e}")

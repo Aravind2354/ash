@@ -9,6 +9,7 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8
 
 import logging
 import time
+import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Tuple, Any
 
@@ -21,6 +22,10 @@ from src.models import (
     VisualData,
     SSLData,
 )
+from src.domain_analyzer import DomainAnalyzer, DomainIdentity
+from src.brand_detector import BrandDetector, BrandAnalysisResult
+from src.feature_extractor import FeatureExtractor, FEATURE_NAMES
+from src.ml_model import MLPhishingModel
 
 
 # Default base weights across the 5 categories (sum = 1.0)
@@ -39,13 +44,25 @@ class AIAnalysisEngine:
     """
     AI Analysis Engine that evaluates website authenticity from collected data.
 
-    Evaluates structural, behavioral, cryptographic, and visual signals
-    across all available data categories using normalized rule-based heuristics.
+    Combines XGBoost-based machine learning probability prediction with domain identity,
+    brand impersonation detection, and non-linear safety risk gates.
     """
 
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        logger: Optional[logging.Logger] = None,
+        ml_model: Optional[MLPhishingModel] = None,
+        feature_extractor: Optional[FeatureExtractor] = None,
+    ):
         """Initialize the AI Analysis Engine."""
         self.logger = logger or logging.getLogger(__name__)
+        self.domain_analyzer = DomainAnalyzer()
+        self.brand_detector = BrandDetector()
+        self.feature_extractor = feature_extractor or FeatureExtractor(
+            domain_analyzer=self.domain_analyzer,
+            brand_detector=self.brand_detector,
+        )
+        self.ml_model = ml_model or MLPhishingModel(logger=self.logger)
 
     def _is_exact_non_negative_int(self, val: Any) -> bool:
         """Check if a value is an exact integer and >= 0 (excluding bool)."""
@@ -243,16 +260,24 @@ class AIAnalysisEngine:
 
         return True, ""
 
-    def analyze(self, data: AnalysisData, timeout: int = DEFAULT_ANALYSIS_TIMEOUT) -> AnalysisScores:
+    def analyze(
+        self,
+        data: AnalysisData,
+        url: Optional[str] = None,
+        reputation: Optional[Dict[str, Any]] = None,
+        timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
+    ) -> AnalysisScores:
         """
-        Analyze collected website data and generate authenticity scores.
+        Analyze collected website data and generate authenticity scores with risk gating.
 
         Args:
             data: AnalysisData containing collected categories.
+            url: Optional analyzed website URL for domain and brand analysis.
+            reputation: Optional threat intelligence reputation result.
             timeout: Maximum execution time in seconds (default 10s per Requirement 3.8).
 
         Returns:
-            AnalysisScores with authenticity_score, fake_score, top_factors, and suspicious_indicators.
+            AnalysisScores with authenticity_score, fake_score, top_factors, suspicious_indicators, risk_level, and critical_indicators.
 
         Raises:
             ValueError: If input is not AnalysisData or has fewer than 3 collected categories (Req 3.5).
@@ -319,31 +344,199 @@ class AIAnalysisEngine:
         if total_active_weight == 0:
             raise RuntimeError("No active category weights available for scoring")
 
-        weighted_authenticity = sum(
+        category_heuristic_authenticity = sum(
             (CATEGORY_BASE_WEIGHTS[cat] / total_active_weight) * category_scores[cat]
             for cat in active_categories
         )
+
+        # Extract DOM metrics and content for phishing detection
+        html = data.dom.html_content if data.dom and isinstance(data.dom.html_content, str) else ""
+        dom_metrics = data.dom.structure_metrics if data.dom and isinstance(data.dom.structure_metrics, dict) else {}
+        pwd_count = dom_metrics.get('password_input_count', 0)
+        email_count = dom_metrics.get('email_input_count', 0)
+        card_count = dom_metrics.get('card_input_count', 0)
+        otp_count = dom_metrics.get('otp_input_count', 0)
+        hidden_count = dom_metrics.get('hidden_input_count', 0)
+        iframe_count = dom_metrics.get('iframe_count', 0)
+        ext_action_count = dom_metrics.get('external_form_action_count', 0)
+        cross_domain_action_count = dom_metrics.get('cross_domain_form_action_count', 0)
+        login_kw_count = dom_metrics.get('login_keyword_count', 0)
+
+        # Extract page title and headings for brand detection
+        page_title = ""
+        headings = []
+        if html:
+            title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+            if title_match:
+                page_title = title_match.group(1).strip()
+            h_matches = re.findall(r'<h[1-3][^>]*>(.*?)</h[1-3]>', html, re.IGNORECASE | re.DOTALL)
+            headings = [re.sub(r'<[^>]+>', '', h).strip() for h in h_matches if h]
+
+        # Domain Identity & Brand Impersonation Analysis
+        critical_indicators: List[str] = []
+        suspicious_indicators: List[str] = []
+        risk_level = "SAFE"
+
+        domain_info: Optional[DomainIdentity] = None
+        brand_result: Optional[BrandAnalysisResult] = None
+
+        if url:
+            domain_info = self.domain_analyzer.analyze_domain(url)
+            brand_result = self.brand_detector.detect_brand_impersonation(
+                url, page_title=page_title, html_content=html, headings=headings
+            )
+
+        # -------------------------------------------------------------
+        # ML Feature Extraction & XGBoost Probability Prediction
+        # -------------------------------------------------------------
+        features_dict = self.feature_extractor.extract_features_dict(
+            data=data,
+            url=url,
+            reputation=reputation,
+            domain_info=domain_info,
+            brand_result=brand_result,
+        )
+
+        ml_phishing_prob = self.ml_model.predict_phishing_probability(features_dict)
+        ml_authenticity_prob = 1.0 - ml_phishing_prob
+
+        if url and self.ml_model.is_trained:
+            # Blend ML probability with heuristic baseline (70% ML model, 30% categories)
+            weighted_authenticity = (ml_authenticity_prob * 0.70) + (category_heuristic_authenticity * 0.30)
+        else:
+            weighted_authenticity = category_heuristic_authenticity
+
+        # -------------------------------------------------------------
+        # RISK GATES: Strong Phishing & Impersonation Gating Logic
+        # -------------------------------------------------------------
+
+        # Gate 1: Brand Impersonation Mismatch
+        if brand_result and brand_result.is_impersonation:
+            critical_indicators.extend(brand_result.indicators)
+            if pwd_count > 0 or email_count > 0 or card_count > 0 or otp_count > 0:
+                critical_indicators.append(
+                    "CREDENTIAL_HARVESTING: Login/security input fields on unauthorized brand impersonation domain"
+                )
+                weighted_authenticity = min(weighted_authenticity, 0.08)
+                risk_level = "PHISHING"
+            else:
+                weighted_authenticity = min(weighted_authenticity, 0.18)
+                risk_level = "HIGH_RISK"
+
+        # Gate 2: Cross-Domain Credential Exfiltration
+        if cross_domain_action_count > 0 and (pwd_count > 0 or email_count > 0 or card_count > 0):
+            critical_indicators.append(
+                "CROSS_DOMAIN_EXFILTRATION: Sensitive credentials submitted to an external third-party domain"
+            )
+            weighted_authenticity = min(weighted_authenticity, 0.10)
+            risk_level = "PHISHING"
+
+        # Gate 3: Payment / OTP Harvesting on Unverified / Unknown Domain
+        if (card_count > 0 or otp_count > 0) and not (brand_result and brand_result.brand_detected and brand_result.brand_domain_match):
+            if card_count > 0:
+                critical_indicators.append("CREDENTIAL_HARVESTING: Payment / credit card details entry on unverified domain")
+            if otp_count > 0:
+                critical_indicators.append("CREDENTIAL_HARVESTING: One-Time Passcode (OTP) / PIN entry requested on unverified domain")
+            weighted_authenticity = min(weighted_authenticity, 0.10)
+            risk_level = "PHISHING"
+
+        # Gate 4: Confirmed Malicious Threat Intelligence
+        if reputation and reputation.get("threat_detected"):
+            provider_name = reputation.get("provider", "Threat Intelligence")
+            critical_indicators.append(f"CONFIRMED_THREAT: Flagged as malicious by {provider_name}")
+            weighted_authenticity = 0.0
+            risk_level = "PHISHING"
+
+        # Gate 5: Suspicious Domain & High Numeric Density
+        if domain_info and domain_info.suspicious_hostname:
+            # If domain is verified authorized brand domain, ignore standard auth keywords
+            is_verified_brand = bool(brand_result and brand_result.brand_detected and brand_result.brand_domain_match)
+            if not is_verified_brand:
+                suspicious_indicators.extend(domain_info.risk_factors)
+                if domain_info.longest_numeric_sequence >= 6 or domain_info.numeric_ratio > 0.35:
+                    weighted_authenticity = min(weighted_authenticity, 0.25)
+                    if risk_level not in ["PHISHING", "HIGH_RISK"]:
+                        risk_level = "HIGH_RISK"
+                elif domain_info.is_ip_address:
+                    weighted_authenticity = min(weighted_authenticity, 0.45)
+                    if risk_level == "SAFE":
+                        risk_level = "SUSPICIOUS"
+                elif domain_info.punycode_detected:
+                    weighted_authenticity = min(weighted_authenticity, 0.45)
+                    if risk_level == "SAFE":
+                        risk_level = "SUSPICIOUS"
+                else:
+                    weighted_authenticity = min(weighted_authenticity, 0.45)
+                    if risk_level == "SAFE":
+                        risk_level = "SUSPICIOUS"
+
+        # Gate 6: Structural Deception Signals
+        if hidden_count > 5:
+            suspicious_indicators.append(f"Excessive hidden form inputs ({hidden_count} hidden fields)")
+            weighted_authenticity = min(weighted_authenticity, 0.55)
+            if risk_level == "SAFE":
+                risk_level = "SUSPICIOUS"
+
+        if iframe_count > 5:
+            suspicious_indicators.append(f"Excessive embedded iframe elements ({iframe_count} iframes)")
+            weighted_authenticity = min(weighted_authenticity, 0.60)
+            if risk_level == "SAFE":
+                risk_level = "SUSPICIOUS"
+
+        # Gate 7: Legitimate Domain Verification
+        if brand_result and brand_result.brand_detected and brand_result.brand_domain_match:
+            weighted_authenticity = max(weighted_authenticity, 0.85)
+            risk_level = "SAFE"
+            suspicious_indicators = [ind for ind in suspicious_indicators if "Suspicious authentication keywords" not in ind]
+        elif domain_info and domain_info.domain_identity_score >= 0.90 and not (brand_result and brand_result.is_impersonation) and cross_domain_action_count == 0:
+            if weighted_authenticity >= 0.70:
+                risk_level = "SAFE"
 
         # Clamp authenticity score strictly to [0.0, 1.0] (Req 3.2)
         authenticity_score = max(0.0, min(1.0, weighted_authenticity))
 
         # Calculate fake score naturally as complementary probability (Req 3.3, 3.4)
-        # Using 4 decimal places preserving natural float sum within tolerance of 0.01
         fake_score = round(1.0 - authenticity_score, 4)
         fake_score = max(0.0, min(1.0, fake_score))
 
-        # Select exactly 3 deterministic top factors ranked by weighted influence (Req 7.4 & Property 25)
-        top_factors = self._select_top_factors(active_categories, category_scores, category_factors)
+        # Standardize Risk Level
+        if risk_level not in ["PHISHING", "HIGH_RISK", "SAFE"]:
+            if fake_score >= 0.70 or critical_indicators:
+                risk_level = "HIGH_RISK"
+            elif fake_score >= 0.45 or suspicious_indicators:
+                risk_level = "SUSPICIOUS"
+            else:
+                risk_level = "SAFE"
+        elif risk_level == "SAFE":
+            if critical_indicators:
+                risk_level = "HIGH_RISK"
+            elif fake_score >= 0.50:
+                risk_level = "SUSPICIOUS"
 
-        # Gate suspicious indicators on Fake_Score > 0.5 (Req 7.3 & Property 24)
-        if fake_score > 0.5:
-            final_suspicious = list(dict.fromkeys(all_suspicious_indicators))
+        # Generate ML model feature explanations for this prediction
+        model_explanations = self.ml_model.explain_prediction(features_dict, fake_score, top_k=3)
+
+        # Select exactly 3 deterministic top factors ranked by weighted influence (Req 7.4 & Property 25)
+        top_factors = self._select_top_factors(
+            active_categories,
+            category_scores,
+            category_factors,
+            risk_level=risk_level,
+            critical_indicators=critical_indicators,
+            suspicious_indicators=suspicious_indicators + all_suspicious_indicators,
+            model_explanations=model_explanations,
+        )
+
+        # Gate suspicious indicators on Fake_Score > 0.5 or critical indicators (Req 7.3 & Property 24)
+        combined_suspicious = critical_indicators + suspicious_indicators + all_suspicious_indicators
+        if fake_score > 0.5 or critical_indicators or suspicious_indicators:
+            final_suspicious = list(dict.fromkeys(combined_suspicious))
         else:
             final_suspicious = []
 
         self.logger.info(
             f"AI analysis completed: authenticity={authenticity_score:.4f}, fake={fake_score:.4f}, "
-            f"{len(top_factors)} top factors, {len(final_suspicious)} suspicious indicators"
+            f"ml_phish_prob={ml_phishing_prob:.4f}, risk_level={risk_level}, {len(top_factors)} top factors, {len(final_suspicious)} suspicious indicators"
         )
 
         return AnalysisScores(
@@ -351,6 +544,8 @@ class AIAnalysisEngine:
             fake_score=fake_score,
             top_factors=top_factors,
             suspicious_indicators=final_suspicious,
+            risk_level=risk_level,
+            critical_indicators=critical_indicators,
         )
 
     def _select_top_factors(
@@ -358,18 +553,33 @@ class AIAnalysisEngine:
         active_categories: List[str],
         category_scores: Dict[str, float],
         category_factors: Dict[str, List[str]],
+        risk_level: str = "SAFE",
+        critical_indicators: Optional[List[str]] = None,
+        suspicious_indicators: Optional[List[str]] = None,
+        model_explanations: Optional[List[str]] = None,
     ) -> List[str]:
         """
-        Deterministically select and rank the top 3 data factors influencing Authenticity_Score.
-
-        Requirement 7.4 & Property 25:
-        - Exactly 3 factors must be returned for any successful analysis result.
-        - Factors are ranked by category weighted influence (base_weight * category_score).
-        - Unique strings only (deduplicated).
-        - Inactive/failed categories are NEVER included.
-        - If fewer than 3 factors exist, deterministic fallback factors from active categories are added.
+        Deterministically select and rank the top 3 data factors.
+        Prioritizes top risk factors for threats, suppressing misleading positive SSL factors.
         """
+        critical = critical_indicators or []
+        suspicious = suspicious_indicators or []
+        explanations = model_explanations or []
+        selected_factors: List[str] = []
+
+        # If high risk or phishing: pick top risk indicators first
+        if risk_level in ["PHISHING", "HIGH_RISK"]:
+            for ind in critical + suspicious + explanations:
+                if ind and ind not in selected_factors:
+                    if "Valid trusted SSL" in ind or "Recognized trusted Certificate" in ind:
+                        continue
+                    selected_factors.append(ind)
+                    if len(selected_factors) == 3:
+                        return selected_factors
+
         category_priority = ["ssl", "network", "dom", "javascript", "visual"]
+        if risk_level in ["PHISHING", "HIGH_RISK", "SUSPICIOUS"]:
+            category_priority = ["dom", "network", "javascript", "visual", "ssl"]
 
         scored_categories = []
         for cat in active_categories:
@@ -381,16 +591,31 @@ class AIAnalysisEngine:
 
         scored_categories.sort(reverse=True)
 
-        selected_factors: List[str] = []
+        # Phase 1: Round-robin across distinct scored categories to ensure diverse factors
         for _, _, _, cat in scored_categories:
             factors = category_factors.get(cat, [])
             for f in factors:
                 if f and f not in selected_factors:
+                    if risk_level in ["PHISHING", "HIGH_RISK"] and ("Valid trusted SSL" in f or "Recognized trusted Certificate" in f):
+                        continue
                     selected_factors.append(f)
-                    if len(selected_factors) == 3:
-                        break
+                    break
             if len(selected_factors) == 3:
                 break
+
+        # Phase 2: If fewer than 3 factors, add remaining factors
+        if len(selected_factors) < 3:
+            for _, _, _, cat in scored_categories:
+                factors = category_factors.get(cat, [])
+                for f in factors:
+                    if f and f not in selected_factors:
+                        if risk_level in ["PHISHING", "HIGH_RISK"] and ("Valid trusted SSL" in f or "Recognized trusted Certificate" in f):
+                            continue
+                        selected_factors.append(f)
+                        if len(selected_factors) == 3:
+                            break
+                if len(selected_factors) == 3:
+                    break
 
         if len(selected_factors) < 3:
             fallbacks = {
@@ -509,44 +734,111 @@ class AIAnalysisEngine:
 
     def _evaluate_dom(self, dom: DOMData) -> Tuple[float, List[str], List[str]]:
         """
-        Evaluate DOM structure and HTML content signals.
-
-        Base weight: 0.20
-        Signals: total elements, iframe count, form count.
+        Evaluate DOM structure and phishing-related HTML signals.
         """
+
         score = 0.5
         factors: List[str] = []
         suspicious: List[str] = []
 
         metrics = dom.structure_metrics or {}
+
         element_count = (
             metrics.get("element_count")
             or metrics.get("total_elements")
             or len(dom.html_content) // 50
         )
+
         iframe_count = metrics.get("iframe_count", 0)
         form_count = metrics.get("form_count", 0)
 
+        password_input_count = metrics.get("password_input_count", 0)
+        email_input_count = metrics.get("email_input_count", 0)
+        hidden_input_count = metrics.get("hidden_input_count", 0)
+        login_keyword_count = metrics.get("login_keyword_count", 0)
+
+        # General DOM structure
         if element_count >= 10:
-            score += 0.2
-            factors.append(f"Rich DOM element hierarchy ({element_count} elements)")
+            score += 0.15
+            factors.append(
+                f"Rich DOM element hierarchy ({element_count} elements)"
+            )
         elif element_count < 3 and len(dom.html_content) < 50:
             score -= 0.25
-            suspicious.append("Sparse or placeholder DOM structure")
+            suspicious.append(
+                "Sparse or placeholder DOM structure"
+            )
 
+        # Iframes
         if iframe_count == 0:
-            score += 0.15
+            score += 0.10
             factors.append("No embedded iframes detected")
         elif iframe_count > 5:
-            score -= 0.3
-            suspicious.append(f"High number of embedded iframes ({iframe_count} iframes)")
+            score -= 0.20
+            suspicious.append(
+                f"High number of embedded iframes ({iframe_count} iframes)"
+            )
 
+        # Forms
         if 0 < form_count <= 5:
-            score += 0.15
-            factors.append(f"Standard form input structure ({form_count} forms)")
+            score += 0.10
+            factors.append(
+                f"Standard form input structure ({form_count} forms)"
+            )
         elif form_count > 10:
             score -= 0.15
-            suspicious.append(f"Suspiciously high number of input forms ({form_count} forms)")
+            suspicious.append(
+                f"Suspiciously high number of input forms ({form_count} forms)"
+            )
+
+        # Phishing-specific signals
+        if password_input_count > 0:
+            score -= 0.15
+            suspicious.append(
+                f"Password input detected ({password_input_count} password fields)"
+            )
+
+        if email_input_count > 0 and password_input_count > 0:
+            score -= 0.20
+            suspicious.append(
+                "Email and password fields detected together"
+            )
+
+        if login_keyword_count >= 2 and password_input_count > 0:
+            score -= 0.20
+            suspicious.append(
+                "Login/account verification language combined with password input"
+            )
+
+        external_form_action_count = metrics.get("external_form_action_count", 0)
+        if external_form_action_count > 0:
+            score -= 0.25
+            suspicious.append(
+                f"Form submits data to an external third-party domain ({external_form_action_count} external form actions)"
+            )
+
+        if hidden_input_count > 5:
+            score -= 0.10
+            suspicious.append(
+                f"Multiple hidden input fields detected ({hidden_input_count})"
+            )
+
+        if login_keyword_count >= 2:
+            score -= 0.05
+            suspicious.append(
+                f"Multiple account/login related keywords detected ({login_keyword_count})"
+            )
+
+        # Positive signal
+        if (
+            password_input_count == 0
+            and email_input_count == 0
+            and login_keyword_count == 0
+            and external_form_action_count == 0
+        ):
+            factors.append(
+                "No obvious login credential collection signals detected"
+            )
 
         return max(0.0, min(1.0, score)), factors, suspicious
 

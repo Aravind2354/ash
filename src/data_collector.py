@@ -13,11 +13,12 @@ The collector supports:
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import ssl
 import tempfile
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -29,6 +30,20 @@ from src.models import (
     VisualData,
     SSLData
 )
+
+
+_CACHED_SSL_CONTEXT: Optional[ssl.SSLContext] = None
+
+
+def _get_ssl_context() -> ssl.SSLContext:
+    """Get or create cached SSL context for certificate inspection."""
+    global _CACHED_SSL_CONTEXT
+    if _CACHED_SSL_CONTEXT is None:
+        try:
+            _CACHED_SSL_CONTEXT = ssl.create_default_context()
+        except Exception:
+            _CACHED_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    return _CACHED_SSL_CONTEXT
 
 
 class DataCollector:
@@ -459,6 +474,22 @@ class DataCollector:
                 except Exception:
                     pass
 
+    async def _query_selector_count(self, page: Any, selector: str) -> int:
+        """Count elements matching selector, compatible with real Playwright and test mocks."""
+        if page is None:
+            raise ValueError("Sandbox page is not available")
+        query_fn = getattr(page, 'query_selector_all', None)
+        if query_fn is None:
+            return 0
+        res = query_fn(selector)
+        if inspect.isawaitable(res):
+            res = await res
+        if isinstance(res, int):
+            return res
+        if isinstance(res, (list, tuple, set)):
+            return len(res)
+        return 0
+
     async def collect_dom_data(self, sandbox: 'Sandbox') -> DOMData:
         """
         Collect DOM structure and HTML content using Playwright.
@@ -490,24 +521,142 @@ class DataCollector:
                 raise ValueError("Sandbox page is not available")
 
             # Collect HTML content
-            html_content = await sandbox.page.content()
+            content_fn = getattr(sandbox.page, 'content', None)
+            if content_fn is not None:
+                content_res = content_fn()
+                if inspect.isawaitable(content_res):
+                    html_content = await content_res
+                else:
+                    html_content = content_res
+            else:
+                html_content = ""
 
             # Collect DOM structure metrics
-            # Count total elements
-            element_count = sandbox.page.query_selector_all('*')
+            element_count = await self._query_selector_count(sandbox.page, '*')
             structure_metrics['element_count'] = element_count
 
-            # Count forms
-            form_count = sandbox.page.query_selector_all('form')
+            form_count = await self._query_selector_count(sandbox.page, 'form')
             structure_metrics['form_count'] = form_count
 
-            # Count iframes
-            iframe_count = sandbox.page.query_selector_all('iframe')
+            iframe_count = await self._query_selector_count(sandbox.page, 'iframe')
             structure_metrics['iframe_count'] = iframe_count
 
-            # Count scripts
-            script_count = sandbox.page.query_selector_all('script')
+            script_count = await self._query_selector_count(sandbox.page, 'script')
             structure_metrics['script_count'] = script_count
+
+            # Phishing-specific DOM signals
+            try:
+                password_input_count = await self._query_selector_count(sandbox.page, 'input[type="password"]')
+            except Exception:
+                password_input_count = 0
+
+            try:
+                email_input_count = await self._query_selector_count(sandbox.page, "input[type='email']")
+            except Exception:
+                email_input_count = 0
+
+            try:
+                card_input_count = await self._query_selector_count(
+                    sandbox.page,
+                    "input[name*='card'], input[name*='cvv'], input[name*='exp'], input[autocomplete*='cc-']"
+                )
+            except Exception:
+                card_input_count = 0
+
+            try:
+                otp_input_count = await self._query_selector_count(
+                    sandbox.page,
+                    "input[name*='otp'], input[name*='pin'], input[autocomplete*='one-time-code']"
+                )
+            except Exception:
+                otp_input_count = 0
+
+            try:
+                hidden_input_count = await self._query_selector_count(sandbox.page, "input[type='hidden']")
+            except Exception:
+                hidden_input_count = 0
+
+            login_keyword_count = 0
+            if hasattr(sandbox.page, 'locator'):
+                try:
+                    locator_res = sandbox.page.locator("body")
+                    if hasattr(locator_res, 'evaluate'):
+                        kw_res = locator_res.evaluate(
+                            """body => {
+                                 const text = (body.innerText || '').toLowerCase();
+                                 const keywords = [
+                                  'login',
+                                  'log in',
+                                  'sign in',
+                                  'verify your account',
+                                  'verify account',
+                                  'confirm your account',
+                                  'password',
+                                  'credit card',
+                                  'bank account',
+                                  'security verification',
+                                  'account verification'
+                                ];
+
+                                return keywords.reduce(
+                                  (count, keyword) =>
+                                     count + (text.includes(keyword) ? 1 : 0),
+                                    0
+                                );
+                              }"""
+                        )
+                        if inspect.isawaitable(kw_res):
+                            kw_res = await kw_res
+                        if isinstance(kw_res, (int, float)):
+                            login_keyword_count = int(kw_res)
+                except Exception:
+                    pass
+
+            external_form_action_count = 0
+            cross_domain_form_action_count = 0
+            if hasattr(sandbox.page, 'evaluate'):
+                try:
+                    form_eval = sandbox.page.evaluate(
+                        """() => {
+                            const forms = document.querySelectorAll('form');
+                            const actions = [];
+                            forms.forEach(f => {
+                                const action = (f.getAttribute('action') || '').trim();
+                                if (action) actions.push(action);
+                            });
+                            return actions;
+                        }"""
+                    )
+                    if inspect.isawaitable(form_eval):
+                        form_eval = await form_eval
+                    if isinstance(form_eval, list):
+                        page_url = getattr(sandbox.page, 'url', '') or ''
+                        from src.domain_analyzer import DomainAnalyzer
+                        from urllib.parse import urlparse
+                        _, _, page_root, _ = DomainAnalyzer.extract_registrable_domain(urlparse(page_url).hostname or '')
+                        for action in form_eval:
+                            if isinstance(action, str) and (action.startswith('http://') or action.startswith('https://')):
+                                try:
+                                    parsed_action = urlparse(action)
+                                    action_host = (parsed_action.hostname or '').lower()
+                                    if action_host:
+                                        external_form_action_count += 1
+                                        _, _, action_root, _ = DomainAnalyzer.extract_registrable_domain(action_host)
+                                        if page_root and action_root and page_root != action_root:
+                                            cross_domain_form_action_count += 1
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+            structure_metrics['password_input_count'] = password_input_count
+            structure_metrics['email_input_count'] = email_input_count
+            structure_metrics['card_input_count'] = card_input_count
+            structure_metrics['otp_input_count'] = otp_input_count
+            structure_metrics['hidden_input_count'] = hidden_input_count
+            structure_metrics['login_keyword_count'] = login_keyword_count
+            structure_metrics['external_form_action_count'] = external_form_action_count
+            structure_metrics['cross_domain_form_action_count'] = cross_domain_form_action_count
 
             self.logger.info(
                 f"DOM data collected: {element_count} elements, {form_count} forms, {iframe_count} iframes, {script_count} scripts",
@@ -517,14 +666,14 @@ class DataCollector:
                         "form_count": form_count,
                         "iframe_count": iframe_count,
                         "script_count": script_count,
-                        "html_length": len(html_content),
+                        "html_length": len(html_content) if isinstance(html_content, str) else 0,
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     }
                 }
             )
 
             return DOMData(
-                html_content=html_content,
+                html_content=str(html_content) if html_content is not None else "",
                 structure_metrics=structure_metrics,
                 failed=False
             )
@@ -567,13 +716,23 @@ class DataCollector:
         dom_modifications = 0
         external_api_calls = 0
 
+        cleanup_script = """
+        (() => {
+            if (window.__dataCollectorMutationObserver) {
+                window.__dataCollectorMutationObserver.disconnect();
+                delete window.__dataCollectorMutationObserver;
+            }
+            delete window.__dataCollectorMutationCount;
+            delete window.__dataCollectorApiCallCount;
+        })();
+        """
+
         try:
             if sandbox.page is None:
                 raise ValueError("Sandbox page is not available")
 
             # Count script elements
-            script_elements = sandbox.page.query_selector_all('script')
-            script_count = script_elements
+            script_count = await self._query_selector_count(sandbox.page, 'script')
 
             # Track DOM modifications using MutationObserver
             # Inject script to set up observer
@@ -592,7 +751,9 @@ class DataCollector:
                 window.__dataCollectorMutationObserver = observer;
             })();
             """
-            await sandbox.page.evaluate(observer_script)
+            eval_obs = sandbox.page.evaluate(observer_script)
+            if inspect.isawaitable(eval_obs):
+                await eval_obs
 
             # Track external API calls by intercepting fetch and XHR
             # Inject script to intercept calls
@@ -615,27 +776,23 @@ class DataCollector:
                 };
             })();
             """
-            await sandbox.page.evaluate(api_intercept_script)
+            eval_api = sandbox.page.evaluate(api_intercept_script)
+            if inspect.isawaitable(eval_api):
+                await eval_api
 
-            # Wait a brief moment to allow any JavaScript execution
-            await asyncio.sleep(0.1)
+            # Yield to event loop to allow JavaScript tasks to settle
+            await asyncio.sleep(0)
 
             # Read collected metrics
-            dom_modifications = await sandbox.page.evaluate("window.__dataCollectorMutationCount || 0")
-            external_api_calls = await sandbox.page.evaluate("window.__dataCollectorApiCallCount || 0")
+            eval_mut = sandbox.page.evaluate("window.__dataCollectorMutationCount || 0")
+            if inspect.isawaitable(eval_mut):
+                eval_mut = await eval_mut
+            dom_modifications = int(eval_mut) if isinstance(eval_mut, (int, float)) else 0
 
-            # Cleanup: disconnect observer and restore original functions
-            cleanup_script = """
-            (() => {
-                if (window.__dataCollectorMutationObserver) {
-                    window.__dataCollectorMutationObserver.disconnect();
-                    delete window.__dataCollectorMutationObserver;
-                }
-                delete window.__dataCollectorMutationCount;
-                delete window.__dataCollectorApiCallCount;
-            })();
-            """
-            await sandbox.page.evaluate(cleanup_script)
+            eval_calls = sandbox.page.evaluate("window.__dataCollectorApiCallCount || 0")
+            if inspect.isawaitable(eval_calls):
+                eval_calls = await eval_calls
+            external_api_calls = int(eval_calls) if isinstance(eval_calls, (int, float)) else 0
 
             self.logger.info(
                 f"JavaScript data collected: {script_count} scripts, {dom_modifications} DOM modifications, {external_api_calls} API calls",
@@ -666,23 +823,15 @@ class DataCollector:
                     }
                 }
             )
-            # Attempt cleanup even on failure
-            try:
-                if sandbox.page:
-                    cleanup_script = """
-                    (() => {
-                        if (window.__dataCollectorMutationObserver) {
-                            window.__dataCollectorMutationObserver.disconnect();
-                            delete window.__dataCollectorMutationObserver;
-                        }
-                        delete window.__dataCollectorMutationCount;
-                        delete window.__dataCollectorApiCallCount;
-                    })();
-                    """
-                    await sandbox.page.evaluate(cleanup_script)
-            except Exception:
-                pass
             raise
+        finally:
+            if sandbox.page is not None:
+                try:
+                    eval_clean = sandbox.page.evaluate(cleanup_script)
+                    if inspect.isawaitable(eval_clean):
+                        await eval_clean
+                except Exception:
+                    pass
 
     async def collect_visual_data(self, sandbox: 'Sandbox') -> VisualData:
         """
@@ -719,21 +868,22 @@ class DataCollector:
             screenshot_path = os.path.join(tempfile.gettempdir(), screenshot_filename)
 
             # Capture screenshot
-            await sandbox.page.screenshot(path=screenshot_path, full_page=False)
+            shot_res = sandbox.page.screenshot(path=screenshot_path, full_page=False)
+            if inspect.isawaitable(shot_res):
+                await shot_res
 
             # Extract layout characteristics
-            # Get viewport size
-            viewport_size = sandbox.page.viewport_size
-            if viewport_size:
-                layout_characteristics['viewport_width'] = viewport_size['width']
-                layout_characteristics['viewport_height'] = viewport_size['height']
+            viewport_size = getattr(sandbox.page, 'viewport_size', None)
+            if viewport_size and isinstance(viewport_size, dict):
+                if 'width' in viewport_size and 'height' in viewport_size:
+                    layout_characteristics['viewport_width'] = viewport_size['width']
+                    layout_characteristics['viewport_height'] = viewport_size['height']
 
             # Count images
-            image_count = sandbox.page.query_selector_all('img')
+            image_count = await self._query_selector_count(sandbox.page, 'img')
             layout_characteristics['image_count'] = image_count
 
-            # Get basic color information (simplified - could be enhanced with actual color analysis)
-            # For now, just record that color analysis is available
+            # Color analysis availability flag
             layout_characteristics['color_analysis_available'] = True
 
             self.logger.info(
@@ -825,7 +975,7 @@ class DataCollector:
             port = parsed.port or 443
 
             # Create SSL context with default certificate verification
-            context = ssl.create_default_context()
+            context = _get_ssl_context()
 
             # Establish SSL connection with timeout
             # Use asyncio.to_thread to run blocking SSL operations in thread pool

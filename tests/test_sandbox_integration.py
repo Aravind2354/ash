@@ -41,7 +41,7 @@ def _docker_available() -> bool:
     """Return True if Docker daemon is reachable."""
     try:
         import docker
-        client = docker.from_env()
+        client = docker.from_env(timeout=2)
         client.ping()
         return True
     except Exception:
@@ -692,14 +692,14 @@ class TestTask14_3_DockerIsolationBreach:
     def docker_client(self):
         """Create Docker client."""
         import docker
-        client = docker.from_env()
+        client = docker.from_env(timeout=2)
         yield client
 
     @pytest.fixture
     def minimal_container(self, docker_client):
         """Create a basic non-privileged container for orchestration flow testing."""
         container = docker_client.containers.create(
-            "python:3.11-slim",
+            "website-authenticity-detector:test",
             command="tail -f /dev/null",
             user="nobody",
             network_mode="bridge",
@@ -754,7 +754,7 @@ class TestTask14_3_DockerIsolationBreach:
     def test_misconfigured_container_fails_assessment(self, docker_client):
         """A container without hardening (no read-only FS) fails the assessment."""
         container = docker_client.containers.create(
-            "python:3.11-slim",
+            "website-authenticity-detector:test",
             command="tail -f /dev/null",
             network_mode="bridge",
             detach=True,
@@ -804,14 +804,14 @@ class TestTask14_3_RealContainerBreachPrevention:
     def docker_client(self):
         """Create Docker client with automatic availability check."""
         import docker
-        client = docker.from_env()
+        client = docker.from_env(timeout=2)
         yield client
 
     @pytest.fixture
     def hardened_sandbox_container(self, docker_client):
         """Create a Docker container with the project's production hardened configuration."""
         container = docker_client.containers.create(
-            "python:3.11-slim",
+            "website-authenticity-detector:test",
             command="tail -f /dev/null",
             user="nobody",
             network_mode="bridge",
@@ -973,7 +973,7 @@ class TestTask14_3_RealContainerBreachPrevention:
         """
         # Create an unhardened (standard writable) container
         writable_container = docker_client.containers.create(
-            "python:3.11-slim",
+            "website-authenticity-detector:test",
             command="tail -f /dev/null",
             network_mode="bridge",
             detach=True,
@@ -987,3 +987,4 @@ class TestTask14_3_RealContainerBreachPrevention:
             assert exec_res.exit_code == 0
         finally:
             writable_container.remove(force=True)
+

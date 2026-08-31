@@ -114,7 +114,7 @@ class ContainerValidator:
         'CAP_MAC_ADMIN',
     }
     
-    def __init__(self):
+    def __init__(self, docker_client: Optional[Any] = None):
         """Initialize the ContainerValidator."""
         self.logger = get_logger(__name__)
         
@@ -124,12 +124,17 @@ class ContainerValidator:
                 "Install with: pip install docker"
             )
         
+        if docker_client is not None:
+            self.docker_client = docker_client
+            self.logger.info("Docker client provided explicitly")
+            return
+
         try:
-            self.docker_client = docker.from_env()
+            self.docker_client = docker.from_env(timeout=2)
             self.logger.info("Docker client initialized successfully")
         except Exception as e:
-            self.logger.error(f"Failed to initialize Docker client: {e}")
-            raise
+            self.logger.warning(f"Docker daemon not reachable during validator init: {e}")
+            self.docker_client = None
     
     def validate_container(self, container: Container) -> ValidationResult:
         """Validate container security configuration.

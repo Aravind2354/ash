@@ -26,13 +26,13 @@ external containment boundary exists (Docker, VM, or OS-level sandbox).
 
 Requirements: 1.1, 1.4, 1.5, 1.6, 6.1, 6.2, 6.6
 """
-
+import tempfile
 import asyncio
 import logging
 import inspect
 import socket
 import os
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Any
 from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -886,7 +886,7 @@ class SandboxManager:
                 )
                 return False, error_msg
         else:
-            # Running locally - warn about lack of isolation
+            # Running locally - warn about lack of isolation and fail-closed
             warning_msg = (
                 "Sandbox is NOT running in a Docker container. "
                 "Host-level isolation is NOT enforced. "
@@ -902,8 +902,6 @@ class SandboxManager:
                     }
                 }
             )
-            # Fail-closed: local development without Docker isolation is not allowed
-            # For production use, Docker isolation is required
             return False, warning_msg
 
     def set_isolation_validated(self, container_id: str) -> None:
@@ -1022,24 +1020,25 @@ class SandboxManager:
             Sandbox instance
         """
         if self.playwright is None:
+            self.logger.info("Sandbox: Playwright starting")
             try:
                 self.playwright = await asyncio.wait_for(
                     async_playwright().start(),
-                    timeout=5.0
+                    timeout=INITIALIZATION_TIMEOUT
                 )
-                self.logger.info("Started Playwright")
+                self.logger.info("Sandbox: Playwright started")
             except asyncio.TimeoutError:
                 self.logger.error(
-                    "Playwright initialization timed out after 5s",
+                    f"Playwright initialization timed out after {INITIALIZATION_TIMEOUT}s",
                     extra={
                         "extra_fields": {
-                            "timeout_seconds": 5.0,
+                            "timeout_seconds": INITIALIZATION_TIMEOUT,
                             "timestamp": datetime.now(timezone.utc).isoformat()
                         }
                     }
                 )
                 raise RuntimeError(
-                    "Playwright initialization timed out after 5s. "
+                    f"Playwright initialization timed out after {INITIALIZATION_TIMEOUT}s. "
                     "Sandbox initialization failed per fail-closed behavior."
                 )
             except Exception as e:
@@ -1049,92 +1048,111 @@ class SandboxManager:
                     "Sandbox initialization failed per fail-closed behavior."
                 )
 
-        if self.browser is None:
-            # Launch browser with isolation settings
-            # SECURITY WARNING: --no-sandbox and --disable-setuid-sandbox disable Chromium's sandbox.
-            # This configuration is for local development compatibility only.
-            # MUST NOT be used for untrusted website analysis without external containment (Docker/VM).
-            # Use launch_persistent_context with explicit user-data-dir to avoid hangs in containerized environments
-            context = await self.playwright.chromium.launch_persistent_context(
-                user_data_dir='/tmp/chromium-profile',
-                headless=True,
-                args=[
-                    '--no-sandbox',  # Required for local development - see security warning above
-                    '--disable-setuid-sandbox',  # Required for local development - see security warning above
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',  # Required for headless in Docker container
-                    '--disable-download',  # Disable downloads to reduce attack surface
-                    '--disable-background-networking',  # Reduce background network activity
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-breakpad',
-                    '--disable-component-extensions-with-background-pages',
-                    '--disable-extensions',
-                    '--disable-features=TranslateUI',
-                    '--disable-ipc-flooding-protection',
-                    '--disable-renderer-backgrounding',
-                    '--disable-sync',
-                    '--disable-default-apps',
-                    '--no-first-run',
-                    '--no-default-browser-check',
-                    '--metrics-recording-only',
-                    '--enable-automation',  # Mark as automated browser
-                ],
-                ignore_https_errors=True,  # For SSL certificate analysis
-                java_script_enabled=True,
-                accept_downloads=False,  # Disable downloads to prevent file system writes
-            )
-            self.browser = context._impl_obj._browser
-            self.logger.info("Launched Chromium browser with persistent context")
+        context = None
+        if self.browser is None or not (hasattr(self.browser, 'is_connected') and self.browser.is_connected()):
+            self.logger.info("Sandbox: browser starting")
+            try:
+                context = await asyncio.wait_for(
+                    self.playwright.chromium.launch_persistent_context(
+                        user_data_dir=tempfile.mkdtemp(prefix='fakewebsite-chromium-'),
+                        headless=True,
+                        args=[
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-gpu',
+                            '--disable-download',
+                            '--disable-background-networking',
+                            '--disable-background-timer-throttling',
+                            '--disable-backgrounding-occluded-windows',
+                            '--disable-breakpad',
+                            '--disable-component-extensions-with-background-pages',
+                            '--disable-extensions',
+                            '--disable-features=TranslateUI',
+                            '--disable-ipc-flooding-protection',
+                            '--disable-renderer-backgrounding',
+                            '--disable-sync',
+                            '--disable-default-apps',
+                            '--no-first-run',
+                            '--no-default-browser-check',
+                            '--metrics-recording-only',
+                            '--enable-automation',
+                        ],
+                        ignore_https_errors=True,
+                        java_script_enabled=True,
+                        accept_downloads=False,
+                    ),
+                    timeout=INITIALIZATION_TIMEOUT
+                )
+                self.browser = getattr(context, '_impl_obj', None) and getattr(context._impl_obj, '_browser', None) or context
+                self.logger.info("Sandbox: browser started")
+            except asyncio.TimeoutError:
+                self.logger.error(f"Browser launch timed out after {INITIALIZATION_TIMEOUT}s")
+                raise RuntimeError(
+                    f"Browser launch timed out after {INITIALIZATION_TIMEOUT}s. "
+                    "Sandbox initialization failed per fail-closed behavior."
+                )
+            except Exception as e:
+                self.logger.error(f"Browser launch failed: {e}")
+                raise RuntimeError(
+                    f"Browser launch failed: {e}. "
+                    "Sandbox initialization failed per fail-closed behavior."
+                )
+        else:
+            try:
+                context = await self.browser.new_context(
+                    ignore_https_errors=True,
+                    java_script_enabled=True,
+                    accept_downloads=False,
+                )
+            except Exception:
+                self.browser = None
+                return await self._create_sandbox_internal()
 
         return Sandbox(self.browser, context, self, self.violation_monitor)
 
     async def _cleanup_partial_initialization(self) -> None:
         """Clean up partial initialization state after failure.
 
-        Handles asyncio.CancelledError to ensure cleanup completes even on cancellation.
+        Safely shuts down all resources and shields from cancellation interruptions.
         State is guaranteed to be consistent after this method returns.
         """
-        try:
-            if self.current_sandbox:
-                await self.current_sandbox.close()
-        except asyncio.CancelledError:
-            self.logger.warning("Cleanup cancelled during sandbox close, continuing cleanup")
-            self.current_sandbox = None
-            raise  # Re-raise to allow caller to handle
-        except Exception as e:
-            self.logger.error(f"Error closing sandbox during partial cleanup: {str(e)}")
-        finally:
-            self.current_sandbox = None
+        self.logger.info("Sandbox: cleanup started")
 
-        try:
-            if self.browser:
-                await self.browser.close()
-        except asyncio.CancelledError:
-            self.logger.warning("Cleanup cancelled during browser close, continuing cleanup")
-            self.browser = None
-            raise  # Re-raise to allow caller to handle
-        except Exception as e:
-            self.logger.error(f"Error closing browser during partial cleanup: {str(e)}")
-        finally:
-            self.browser = None
+        if self.current_sandbox:
+            sb = self.current_sandbox
+            self.current_sandbox = None
+            try:
+                await asyncio.shield(sb.close())
+            except Exception as e:
+                self.logger.warning(f"Error closing current sandbox during cleanup: {e}")
 
-        try:
-            if self.playwright:
-                await self.playwright.stop()
-        except asyncio.CancelledError:
-            self.logger.warning("Cleanup cancelled during Playwright stop, continuing cleanup")
+        if self.browser:
+            b = self.browser
+            self.browser = None
+            try:
+                await asyncio.shield(b.close())
+            except Exception as e:
+                self.logger.warning(f"Error closing browser during cleanup: {e}")
+
+        if self.playwright:
+            pw = self.playwright
             self.playwright = None
-            raise  # Re-raise to allow caller to handle
-        except Exception as e:
-            self.logger.error(f"Error stopping Playwright during partial cleanup: {str(e)}")
-        finally:
-            self.playwright = None
+            try:
+                await asyncio.shield(pw.stop())
+            except Exception as e:
+                self.logger.warning(f"Error stopping Playwright during cleanup: {e}")
+            finally:
+                # Allow Playwright transport background tasks to settle on the event loop
+                try:
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    pass
 
         self._is_initialized = False
-        self.logger.info("Cleaned up partial initialization state")
+        self.logger.info("Sandbox: cleanup completed")
 
-    async def terminate_sandbox(self, force: bool = False) -> None:
+    async def terminate_sandbox(self, sandbox_or_force: Any = None, force: bool = False) -> None:
         """Terminate the sandbox with graceful or forced shutdown.
 
         Attempts graceful shutdown first, then forced termination if needed.
@@ -1144,18 +1162,23 @@ class SandboxManager:
         Requirements: 1.4, 1.6
 
         Args:
+            sandbox_or_force: Optional Sandbox instance or boolean force flag
             force: If True, skip graceful shutdown and force terminate immediately
         """
+        actual_force = force
+        if isinstance(sandbox_or_force, bool):
+            actual_force = sandbox_or_force
+
         async with self._lifecycle_lock:
-            if self.current_sandbox is None:
-                self.logger.warning("No sandbox to terminate")
+            if self.current_sandbox is None and self.browser is None and self.playwright is None:
+                self.logger.debug("No sandbox resources to terminate")
                 return
 
-            self.logger.info(f"Terminating sandbox (force={force})")
+            self.logger.info(f"Terminating sandbox (force={actual_force})")
             start_time = datetime.now(timezone.utc)
 
             try:
-                if force:
+                if actual_force:
                     # Forced termination
                     await self._force_terminate()
                 else:
@@ -1175,7 +1198,7 @@ class SandboxManager:
                 termination_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                 self.logger.info(
                     f"Sandbox terminated in {termination_time:.2f}s",
-                    extra={"extra_fields": {"termination_time_seconds": termination_time, "forced": force}}
+                    extra={"extra_fields": {"termination_time_seconds": termination_time, "forced": actual_force}}
                 )
 
             except asyncio.CancelledError:
@@ -1197,9 +1220,11 @@ class SandboxManager:
         except asyncio.CancelledError:
             self.logger.warning("Graceful termination cancelled, ensuring state consistency")
             self.current_sandbox = None
+            self.browser = None
             self._is_initialized = False
             raise
         self.current_sandbox = None
+        self.browser = None
         self._is_initialized = False
 
     async def _force_terminate(self) -> None:
@@ -1210,41 +1235,35 @@ class SandboxManager:
         """
         self.logger.warning("Forcing sandbox termination")
 
-        try:
-            if self.current_sandbox:
-                await self.current_sandbox.close()
-        except asyncio.CancelledError:
-            self.logger.warning("Force termination cancelled during sandbox close, continuing cleanup")
+        if self.current_sandbox:
+            sb = self.current_sandbox
             self.current_sandbox = None
-            raise
-        except Exception as e:
-            self.logger.error(f"Error closing sandbox during force termination: {str(e)}")
-        finally:
-            self.current_sandbox = None
+            try:
+                await asyncio.shield(sb.close())
+            except Exception as e:
+                self.logger.warning(f"Error closing sandbox during force termination: {e}")
 
-        try:
-            if self.browser:
-                await self.browser.close()
-        except asyncio.CancelledError:
-            self.logger.warning("Force termination cancelled during browser close, continuing cleanup")
+        if self.browser:
+            b = self.browser
             self.browser = None
-            raise
-        except Exception as e:
-            self.logger.error(f"Error closing browser during force termination: {str(e)}")
-        finally:
-            self.browser = None
+            try:
+                await asyncio.shield(b.close())
+            except Exception as e:
+                self.logger.warning(f"Error closing browser during force termination: {e}")
 
-        try:
-            if self.playwright:
-                await self.playwright.stop()
-        except asyncio.CancelledError:
-            self.logger.warning("Force termination cancelled during Playwright stop, continuing cleanup")
+        if self.playwright:
+            pw = self.playwright
             self.playwright = None
-            raise
-        except Exception as e:
-            self.logger.error(f"Error stopping Playwright during force termination: {str(e)}")
-        finally:
-            self.playwright = None
+            try:
+                await asyncio.shield(pw.stop())
+            except Exception as e:
+                self.logger.warning(f"Error stopping Playwright during force termination: {e}")
+            finally:
+                # Allow Playwright transport background tasks to settle on the event loop
+                try:
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    pass
 
         self._is_initialized = False
         self.logger.warning("Forced termination complete")

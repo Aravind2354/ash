@@ -59,7 +59,7 @@ class ContainerManager:
             )
 
         try:
-            self.docker_client = docker.from_env()
+            self.docker_client = docker.from_env(timeout=2)
             self.logger.info("Docker client initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize Docker client: {e}")
@@ -70,8 +70,8 @@ class ContainerManager:
             from src.container_validator import ContainerValidator
             from src.isolation_orchestrator import IsolationOrchestrator
 
-            self.container_validator = ContainerValidator()
-            self.isolation_orchestrator = IsolationOrchestrator()
+            self.container_validator = ContainerValidator(docker_client=self.docker_client)
+            self.isolation_orchestrator = IsolationOrchestrator(docker_client=self.docker_client)
 
             self.logger.info("Isolation validation components initialized")
         except ImportError as e:
@@ -110,7 +110,11 @@ class ContainerManager:
 
         # Apply hardened defaults with comprehensive security isolation
         hardened_config = {
-            "user": "nobody",  # Non-root user
+            "user": "analyzer",  # Non-root user (UID 1000)
+            "environment": {
+                "PLAYWRIGHT_BROWSERS_PATH": "/home/analyzer/.cache/ms-playwright",
+                "HOME": "/home/analyzer"
+            },
             "network_mode": "bridge",  # Bridge networking for controlled external access
             "pid_mode": None,  # Isolated PID namespace (not host)
             "ipc_mode": "private",  # Isolated IPC namespace (not host)
@@ -124,7 +128,10 @@ class ContainerManager:
             "cap_add": [],  # No additional capabilities
             "privileged": False,  # No privileged mode
             "volumes": {},  # No volumes by default
-            "tmpfs": {},  # No tmpfs by default
+            "tmpfs": {
+                "/tmp": "size=64m,nosuid,nodev,noexec",
+                "/analysis/temp": "size=64m,nosuid,nodev,noexec",
+            },
             "detach": True,
         }
 
