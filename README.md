@@ -13,7 +13,8 @@ An AI-powered security tool that analyzes websites to determine if they are genu
   - SSL certificate validation
 - **AI-Powered Detection**: Machine learning-based analysis to identify patterns indicative of fraudulent websites
 - **Robust Error Handling**: Graceful degradation with partial results when data collection is incomplete
-- **Clear Reporting**: Probability scores with confidence indicators and detailed analysis reports
+- **Clear Reporting**: Probability scores with confidence indicators, key factors, and detailed analysis reports
+- **Multiple Interfaces**: Python API, Command Line Interface (CLI), and interactive Web Application
 
 ## Requirements
 
@@ -45,15 +46,19 @@ playwright install
 
 ```
 .
-├── src/                    # Source code
-├── tests/                  # Test suite
+├── src/                    # Source code (API, analysis engine, sandbox, detector)
+├── web/                    # FastAPI web application and frontend UI
+├── tests/                  # Comprehensive test suite (unit, property, integration)
+├── scripts/                # Evaluation, diagnostic, and training scripts
 ├── config/                 # Configuration files
 ├── requirements.txt        # Python dependencies
-├── pyproject.toml         # Project configuration
-└── README.md              # This file
+├── pyproject.toml          # Project configuration
+└── README.md               # Documentation
 ```
 
 ## Usage
+
+### 1. Python API
 
 ```python
 from src.analyzer import analyze_website
@@ -64,6 +69,29 @@ result = analyze_website("https://example.com")
 print(f"Authenticity Score: {result['authenticity_score']}")
 print(f"Fake Score: {result['fake_score']}")
 print(f"Confidence: {result['confidence_indicator']}")
+print(f"Top Factors: {result['top_factors']}")
+```
+
+### 2. Command Line Interface (CLI)
+
+```bash
+# Analyze a website with human-readable summary
+python -m src https://example.com
+
+# Export full JSON report to stdout
+python -m src https://example.com --json
+
+# Save report to a file
+python -m src https://example.com --output report.json
+```
+
+### 3. Web Application & Dashboard
+
+```bash
+# Start the web server
+python run_server.py
+
+# Open browser at http://localhost:8000
 ```
 
 ## Development
@@ -104,4 +132,3 @@ MIT
 ## Contributing
 
 Contributions are welcome! Please ensure all tests pass before submitting pull requests.
-# ash

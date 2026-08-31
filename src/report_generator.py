@@ -355,3 +355,61 @@ class ReportGenerator:
             "suspicious_indicators": susp_val,
             "error_message": err_msg,
         }
+
+    @staticmethod
+    def format_text_summary(report_dict: Dict[str, Any]) -> str:
+        """
+        Generate a human-readable text summary from an analysis report dictionary.
+
+        Args:
+            report_dict: Analysis report dictionary.
+
+        Returns:
+            Formatted multi-line text summary string suitable for console output.
+        """
+        lines = []
+        url = report_dict.get("url", "N/A")
+        auth_score = report_dict.get("authenticity_score", "N/A")
+        fake_score = report_dict.get("fake_score", "N/A")
+        confidence = report_dict.get("confidence_indicator", "N/A")
+        error = report_dict.get("error_message")
+
+        lines.append("=" * 60)
+        lines.append("        WEBSITE AUTHENTICITY ANALYSIS REPORT")
+        lines.append("=" * 60)
+        lines.append(f"Target URL:            {url}")
+        lines.append(f"Authenticity Score:    {auth_score}")
+        lines.append(f"Fake Probability:      {fake_score}")
+        lines.append(f"Confidence Indicator:  {confidence}")
+
+        if error:
+            lines.append(f"Status / Error:        {error}")
+
+        top_factors = report_dict.get("top_factors") or []
+        if top_factors:
+            lines.append("-" * 60)
+            lines.append("Top Authenticity Factors:")
+            for factor in top_factors:
+                lines.append(f"  [+] {factor}")
+
+        suspicious = report_dict.get("suspicious_indicators") or []
+        if suspicious:
+            lines.append("-" * 60)
+            lines.append("Suspicious Risk Indicators:")
+            for ind in suspicious:
+                lines.append(f"  [!] {ind}")
+
+        timestamps = report_dict.get("timestamps") or {}
+        if isinstance(timestamps, dict) and timestamps:
+            start = timestamps.get("analysis_start", "")
+            end = timestamps.get("analysis_completion", "")
+            if start or end:
+                lines.append("-" * 60)
+                if start:
+                    lines.append(f"Started:               {start}")
+                if end:
+                    lines.append(f"Completed:             {end}")
+
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
