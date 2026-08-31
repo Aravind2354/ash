@@ -132,7 +132,10 @@ class Sandbox:
     async def close_page(self) -> None:
         """Close the current page if it exists."""
         if self.page is not None:
-            await self.page.close()
+            try:
+                await asyncio.wait_for(self.page.close(), timeout=2.0)
+            except Exception as e:
+                self.logger.warning(f"Error closing page in sandbox context: {e}")
             self.page = None
             self.logger.info("Closed page in sandbox context")
 
@@ -140,7 +143,10 @@ class Sandbox:
         """Close the browser context."""
         await self.close_page()
         if self.context:
-            await self.context.close()
+            try:
+                await asyncio.wait_for(self.context.close(), timeout=3.0)
+            except Exception as e:
+                self.logger.warning(f"Error closing context: {e}")
             self.logger.info("Closed sandbox context")
 
     async def load_url(self, url: str, timeout: int = 30) -> bool:
@@ -1225,6 +1231,13 @@ class SandboxManager:
             raise
         self.current_sandbox = None
         self.browser = None
+        if self.playwright:
+            pw = self.playwright
+            self.playwright = None
+            try:
+                await asyncio.wait_for(asyncio.shield(pw.stop()), timeout=2.0)
+            except Exception as e:
+                self.logger.warning(f"Error stopping Playwright during graceful termination: {e}")
         self._is_initialized = False
 
     async def _force_terminate(self) -> None:

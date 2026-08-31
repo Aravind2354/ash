@@ -266,6 +266,7 @@ class AIAnalysisEngine:
         url: Optional[str] = None,
         reputation: Optional[Dict[str, Any]] = None,
         timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
+        progress_callback: Optional[Any] = None,
     ) -> AnalysisScores:
         """
         Analyze collected website data and generate authenticity scores with risk gating.
@@ -275,6 +276,7 @@ class AIAnalysisEngine:
             url: Optional analyzed website URL for domain and brand analysis.
             reputation: Optional threat intelligence reputation result.
             timeout: Maximum execution time in seconds (default 10s per Requirement 3.8).
+            progress_callback: Optional callback for reporting analysis progress stages.
 
         Returns:
             AnalysisScores with authenticity_score, fake_score, top_factors, suspicious_indicators, risk_level, and critical_indicators.
@@ -389,6 +391,12 @@ class AIAnalysisEngine:
         # -------------------------------------------------------------
         # ML Feature Extraction & XGBoost Probability Prediction
         # -------------------------------------------------------------
+        if progress_callback and callable(progress_callback):
+            try:
+                progress_callback("extracting features")
+            except Exception:
+                pass
+
         features_dict = self.feature_extractor.extract_features_dict(
             data=data,
             url=url,
@@ -397,8 +405,20 @@ class AIAnalysisEngine:
             brand_result=brand_result,
         )
 
+        if progress_callback and callable(progress_callback):
+            try:
+                progress_callback("running XGBoost")
+            except Exception:
+                pass
+
         ml_phishing_prob = self.ml_model.predict_phishing_probability(features_dict)
         ml_authenticity_prob = 1.0 - ml_phishing_prob
+
+        if progress_callback and callable(progress_callback):
+            try:
+                progress_callback("running AI/hybrid analysis")
+            except Exception:
+                pass
 
         if url and self.ml_model.is_trained:
             # Blend ML probability with heuristic baseline (70% ML model, 30% categories)

@@ -133,6 +133,27 @@ form.addEventListener('submit', async (e) => {
 });
 
 
+const PROGRESS_LABELS = {
+    'queued': 'Analysis queued...',
+    'starting': 'Starting analysis pipeline...',
+    'collecting website data': 'Loading website & collecting browser data...',
+    'extracting features': 'Extracting website security features...',
+    'running xgboost': 'Running XGBoost machine learning inference...',
+    'running ai/hybrid analysis': 'Evaluating risk gates & AI heuristics...',
+    'generating report': 'Generating analysis report...',
+    'completed': 'Analysis completed',
+    'failed': 'Analysis failed'
+};
+
+function formatProgressMessage(progress) {
+    if (!progress) return 'Analysis in progress...';
+    const key = String(progress).trim().toLowerCase();
+    if (PROGRESS_LABELS[key]) {
+        return PROGRESS_LABELS[key];
+    }
+    return progress;
+}
+
 // Poll task status
 async function pollTaskStatus(taskId) {
 
@@ -146,10 +167,10 @@ async function pollTaskStatus(taskId) {
     // Check immediately
     await checkTaskStatus(taskId);
 
-    // Then check every 2 seconds
+    // Then check every 1 second for responsive progress updates
     pollingInterval = setInterval(() => {
         checkTaskStatus(taskId);
-    }, 2000);
+    }, 1000);
 }
 
 
@@ -240,7 +261,7 @@ async function checkTaskStatus(taskId) {
 // Show status
 function showStatus(message) {
     statusSection.classList.remove('hidden');
-    statusText.textContent = message;
+    statusText.textContent = formatProgressMessage(message);
 }
 
 

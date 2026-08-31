@@ -7,6 +7,7 @@ and report generation.
 Requirements: 5.3, 5.4, 5.5, 7.2, 8.3, 9.3
 """
 
+import sys
 import asyncio
 import inspect
 import logging
@@ -53,28 +54,36 @@ class AuthenticityDetector:
         self.reputation_service = ReputationService()
         self.logger = get_logger("authenticity_detector")
 
-    def analyze_website(self, url: str) -> Dict[str, Any]:
+    def analyze_website(self, url: str, progress_callback: Optional[Any] = None) -> Dict[str, Any]:
         """Synchronous wrapper for analyze_website_async.
 
         Validates: Requirements 5.3, 5.4, 5.5, Property 17
         """
         try:
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 # Running inside existing event loop (e.g. FastAPI / asyncio environment)
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, self.analyze_website_async(url))
+                    def _thread_worker():
+                        if sys.platform == "win32":
+                            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+                        return asyncio.run(self.analyze_website_async(url, progress_callback=progress_callback))
+                    future = pool.submit(_thread_worker)
                     return future.result()
             else:
-                return loop.run_until_complete(self.analyze_website_async(url))
+                return loop.run_until_complete(self.analyze_website_async(url, progress_callback=progress_callback))
         except RuntimeError:
-            return asyncio.run(self.analyze_website_async(url))
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            return asyncio.run(self.analyze_website_async(url, progress_callback=progress_callback))
         except Exception as exc:
             # Synchronous wrapper emergency fallback
             return self._build_emergency_fallback(url, "synchronous wrapper", exc)
 
-    async def analyze_website_async(self, url: str) -> Dict[str, Any]:
+    async def analyze_website_async(self, url: str, progress_callback: Optional[Any] = None) -> Dict[str, Any]:
         """Asynchronously orchestrates website authenticity analysis.
 
         Execution Flow:
@@ -93,6 +102,11 @@ class AuthenticityDetector:
         13. Always cleanup/terminate sandbox in a finally block.
         """
         current_operation = "URL validation"
+        if progress_callback and callable(progress_callback):
+            try:
+                progress_callback("starting")
+            except Exception:
+                pass
 
         # Step 1: Input Validation BEFORE Sandbox Creation (Requirement 9.3)
         try:
@@ -132,6 +146,11 @@ class AuthenticityDetector:
             try:
                 # Step 4: Create Sandbox
                 current_operation = "sandbox initialization"
+                if progress_callback and callable(progress_callback):
+                    try:
+                        progress_callback("collecting website data")
+                    except Exception:
+                        pass
                 create_res = sb_manager.create_sandbox()
                 if inspect.isawaitable(create_res):
                     sandbox = await create_res
@@ -265,7 +284,7 @@ class AuthenticityDetector:
                     if isinstance(self.ai_engine, (unittest.mock.Mock, unittest.mock.MagicMock)):
                         scores = self.ai_engine.analyze(analysis_data)
                     else:
-                        scores = self.ai_engine.analyze(analysis_data, url=target_url, reputation=reputation)
+                        scores = self.ai_engine.analyze(analysis_data, url=target_url, reputation=reputation, progress_callback=progress_callback)
                 except TypeError:
                     scores = self.ai_engine.analyze(analysis_data)
 
@@ -299,6 +318,12 @@ class AuthenticityDetector:
 
                 # Step 11: Report Generation
                 current_operation = "report generation"
+                if progress_callback and callable(progress_callback):
+                    try:
+                        progress_callback("generating report")
+                    except Exception:
+                        pass
+
                 result = AnalysisResult(
                     authenticity_score=auth_score,
                     fake_score=fake_score,
@@ -334,6 +359,13 @@ class AuthenticityDetector:
                 report["reputation"] = reputation
                 report["redirects"] = []
                 report["critical_indicators"] = critical_indicators
+
+                if progress_callback and callable(progress_callback):
+                    try:
+                        progress_callback("completed")
+                    except Exception:
+                        pass
+
                 return report
 
             except Exception as exc:
@@ -437,16 +469,21 @@ class AuthenticityDetector:
         }
 
 
-def analyze_website(url: str, detector: Optional[AuthenticityDetector] = None) -> Dict[str, Any]:
+def analyze_website(
+    url: str,
+    detector: Optional[AuthenticityDetector] = None,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
     """Public API function for website authenticity analysis (Requirement 5.3).
 
     Args:
         url: Target website URL string.
         detector: Optional AuthenticityDetector instance for injection/testing.
+        progress_callback: Optional callback function for tracking progress stages.
 
     Returns:
         Dictionary containing authenticity_score, fake_score, confidence_indicator,
         error_message, and all report fields.
     """
     det = detector or AuthenticityDetector()
-    return det.analyze_website(url)
+    return det.analyze_website(url, progress_callback=progress_callback)
