@@ -1,9 +1,9 @@
-# Website Authenticity Detector - Container Image
-# Minimal container for Playwright + Chromium with non-root user
+# Website Authenticity Detector - Cloud Production Container Image
+# Complete production container for FastAPI + Uvicorn + Playwright + XGBoost
 
 FROM python:3.11-slim
 
-# Install system dependencies for Playwright/Chromium
+# Install system dependencies for Playwright / Chromium headless execution
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -29,34 +29,44 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user for defense-in-depth
-RUN useradd -m -u 1000 analyzer
+# Create non-root application user for defense-in-depth security
+RUN useradd -m -u 1000 appuser
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt /tmp/
+# Install Python dependencies
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Install Playwright and Chromium as root, then move to analyzer user
+# Install Playwright and Chromium browser binary as root
 RUN playwright install --with-deps chromium
 
-# Move Playwright cache to analyzer user's home directory
-RUN mkdir -p /home/analyzer/.cache && \
-    cp -r /root/.cache/ms-playwright /home/analyzer/.cache/ && \
-    chown -R analyzer:analyzer /home/analyzer/.cache
+# Copy Playwright browser cache to non-root user directory
+RUN mkdir -p /home/appuser/.cache && \
+    cp -r /root/.cache/ms-playwright /home/appuser/.cache/ && \
+    chown -R appuser:appuser /home/appuser/.cache
 
-# Setup analysis directories with restricted permissions
-RUN mkdir -p /analysis /results && \
-    chown -R analyzer:analyzer /analysis /results
+# Setup application directories
+RUN mkdir -p /app /app/models /app/results && \
+    chown -R appuser:appuser /app
 
 # Switch to non-root user
-ENV PLAYWRIGHT_BROWSERS_PATH=/home/analyzer/.cache/ms-playwright
-ENV HOME=/home/analyzer
-USER analyzer
-WORKDIR /analysis
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright
+ENV HOME=/home/appuser
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8000
+ENV HOST=0.0.0.0
 
-# Copy application code (only what's needed for container execution)
-COPY src/ /analysis/src/
-COPY config/ /analysis/config/
+USER appuser
+WORKDIR /app
 
-# Default command - will be overridden for smoke tests
-CMD ["python", "-m", "src.container_analyzer"]
+# Copy all application assets, models, web UI, and configuration
+COPY src/ /app/src/
+COPY config/ /app/config/
+COPY models/ /app/models/
+COPY web/ /app/web/
+COPY run_server.py /app/run_server.py
+
+# Expose default HTTP port (dynamically overridden by $PORT on cloud platforms)
+EXPOSE 8000
+
+# Default command: Start Uvicorn web server
+CMD ["python", "run_server.py"]

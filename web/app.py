@@ -43,16 +43,27 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 # ============================================================================
 # CORS CONFIGURATION
 # ============================================================================
-# DEVELOPMENT CONFIGURATION - RESTRICTIVE IN PRODUCTION
-# In production, restrict to specific origins that need access.
-# ============================================================================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],  # Restrictive for development
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+import os
+
+cors_origins_env = os.environ.get("CORS_ORIGINS", "").strip()
+if cors_origins_env and cors_origins_env != "*":
+    allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # Default permissive CORS for cloud deployment and API access
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Include API routes
 app.include_router(router, prefix="/api")

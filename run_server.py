@@ -12,9 +12,16 @@ print(
     type(asyncio.get_event_loop_policy()).__name__
 )
 
+import os
+
+port = int(os.getenv("PORT", "8000"))
+host = os.getenv("HOST", "0.0.0.0")
+
+print(f"Starting server on {host}:{port}")
+
 uvicorn.run(
     "web.app:app",
-    host="0.0.0.0",
-    port=8000,
+    host=host,
+    port=port,
     reload=False
 )

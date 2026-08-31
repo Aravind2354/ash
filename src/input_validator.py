@@ -30,6 +30,8 @@ class InputValidator:
         ipaddress.IPv4Network('10.0.0.0/8'),     # Private network
         ipaddress.IPv4Network('172.16.0.0/12'),  # Private network
         ipaddress.IPv4Network('192.168.0.0/16'), # Private network
+        ipaddress.IPv4Network('169.254.0.0/16'), # Link-local / Cloud Metadata (IMDS)
+        ipaddress.IPv4Network('0.0.0.0/8'),      # Current network
     ]
     
     PRIVATE_IPV6_RANGES = [
