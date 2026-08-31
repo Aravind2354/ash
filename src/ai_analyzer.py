@@ -389,7 +389,7 @@ class AIAnalysisEngine:
             )
 
         # -------------------------------------------------------------
-        # ML Feature Extraction & XGBoost Probability Prediction
+        # [5] Feature Extraction, [6] XGBoost Inference & [7] Heuristics
         # -------------------------------------------------------------
         if progress_callback and callable(progress_callback):
             try:
@@ -404,6 +404,8 @@ class AIAnalysisEngine:
             domain_info=domain_info,
             brand_result=brand_result,
         )
+        self.logger.info(f"[5] FEATURE EXTRACTION: {len(features_dict)} canonical features extracted")
+        print(f"[5] FEATURE EXTRACTION: {len(features_dict)} canonical features extracted", flush=True)
 
         if progress_callback and callable(progress_callback):
             try:
@@ -426,30 +428,87 @@ class AIAnalysisEngine:
         else:
             weighted_authenticity = category_heuristic_authenticity
 
+        ml_diag = [
+            f"[6] XGBOOST INFERENCE",
+            f"[ML]",
+            f"Feature extraction executed: YES",
+            f"XGBoost executed: {'YES' if self.ml_model.is_trained else 'NO'}",
+            f"XGBoost phishing probability: {ml_phishing_prob*100:.2f}%",
+            f"XGBoost authenticity probability: {ml_authenticity_prob*100:.2f}%",
+            f"",
+            f"[7] HEURISTIC ANALYSIS",
+            f"[HYBRID]",
+            f"ML contribution: {ml_authenticity_prob * 0.70 * 100:.2f}% (70% weight)",
+            f"Heuristic contribution: {category_heuristic_authenticity * 0.30 * 100:.2f}% (30% weight)",
+            f"Final weighted score: {weighted_authenticity*100:.2f}%",
+        ]
+        for line in ml_diag:
+            self.logger.info(line)
+            print(line, flush=True)
+
         # -------------------------------------------------------------
-        # RISK GATES: Strong Phishing & Impersonation Gating Logic
+        # [9] RISK GATES: Strong Phishing & Impersonation Gating Logic
         # -------------------------------------------------------------
+        triggered_gates: List[str] = []
+        triggered_reasons: List[str] = []
+
+        def log_override(gate_name: str, reason: str, prev_auth: float, new_auth: float, r_level: str):
+            triggered_gates.append(gate_name)
+            triggered_reasons.append(reason)
+            prev_fake = round(1.0 - prev_auth, 4)
+            new_fake = round(1.0 - new_auth, 4)
+            override_lines = [
+                f"[OVERRIDE]",
+                f"gate={gate_name}",
+                f"reason={reason}",
+                f"previous_authenticity={prev_auth:.4f}",
+                f"new_authenticity={new_auth:.4f}",
+                f"previous_fake={prev_fake:.4f}",
+                f"new_fake={new_fake:.4f}",
+                f"risk_level={r_level}"
+            ]
+            for o_line in override_lines:
+                self.logger.info(o_line)
+                print(o_line, flush=True)
+
+        self.logger.info("[9] RISK GATES EVALUATION")
+        print("[9] RISK GATES EVALUATION", flush=True)
+
+        # Gate 0: Explicit Phishing / Security Interstitial Warning in HTML
+        if html and re.search(r"this\s+(?:website|site|page)\s+has\s+been\s+reported\s+(?:for|as)(?:\s+potential)?\s+phishing|suspected\s+phishing|deceptive\s+site\s+ahead", html, re.IGNORECASE):
+            critical_indicators.append(
+                "SECURITY_INTERSTITIAL: Interstitial page content explicitly flagged target website for suspected phishing / security threat"
+            )
+            prev_a = weighted_authenticity
+            weighted_authenticity = min(weighted_authenticity, 0.05)
+            risk_level = "PHISHING"
+            log_override("Gate 0 (Security Interstitial Warning)", "Explicit phishing warning text found in HTML", prev_a, weighted_authenticity, risk_level)
 
         # Gate 1: Brand Impersonation Mismatch
         if brand_result and brand_result.is_impersonation:
             critical_indicators.extend(brand_result.indicators)
+            prev_a = weighted_authenticity
             if pwd_count > 0 or email_count > 0 or card_count > 0 or otp_count > 0:
                 critical_indicators.append(
                     "CREDENTIAL_HARVESTING: Login/security input fields on unauthorized brand impersonation domain"
                 )
                 weighted_authenticity = min(weighted_authenticity, 0.08)
                 risk_level = "PHISHING"
+                log_override("Gate 1 (Brand Impersonation + Credentials)", f"Impersonating {brand_result.brand_detected} with input fields", prev_a, weighted_authenticity, risk_level)
             else:
                 weighted_authenticity = min(weighted_authenticity, 0.18)
                 risk_level = "HIGH_RISK"
+                log_override("Gate 1 (Brand Impersonation)", f"Impersonating {brand_result.brand_detected} on unauthorized root domain", prev_a, weighted_authenticity, risk_level)
 
         # Gate 2: Cross-Domain Credential Exfiltration
         if cross_domain_action_count > 0 and (pwd_count > 0 or email_count > 0 or card_count > 0):
             critical_indicators.append(
                 "CROSS_DOMAIN_EXFILTRATION: Sensitive credentials submitted to an external third-party domain"
             )
+            prev_a = weighted_authenticity
             weighted_authenticity = min(weighted_authenticity, 0.10)
             risk_level = "PHISHING"
+            log_override("Gate 2 (Cross-Domain Exfiltration)", "Credentials submitted to external third-party domain", prev_a, weighted_authenticity, risk_level)
 
         # Gate 3: Payment / OTP Harvesting on Unverified / Unknown Domain
         if (card_count > 0 or otp_count > 0) and not (brand_result and brand_result.brand_detected and brand_result.brand_domain_match):
@@ -457,57 +516,72 @@ class AIAnalysisEngine:
                 critical_indicators.append("CREDENTIAL_HARVESTING: Payment / credit card details entry on unverified domain")
             if otp_count > 0:
                 critical_indicators.append("CREDENTIAL_HARVESTING: One-Time Passcode (OTP) / PIN entry requested on unverified domain")
+            prev_a = weighted_authenticity
             weighted_authenticity = min(weighted_authenticity, 0.10)
             risk_level = "PHISHING"
+            log_override("Gate 3 (Payment/OTP Harvesting)", "Financial or OTP entry fields on unverified domain", prev_a, weighted_authenticity, risk_level)
 
         # Gate 4: Confirmed Malicious Threat Intelligence
         if reputation and reputation.get("threat_detected"):
             provider_name = reputation.get("provider", "Threat Intelligence")
             critical_indicators.append(f"CONFIRMED_THREAT: Flagged as malicious by {provider_name}")
+            prev_a = weighted_authenticity
             weighted_authenticity = 0.0
             risk_level = "PHISHING"
+            log_override("Gate 4 (Threat Intelligence)", f"Confirmed malicious by {provider_name}", prev_a, weighted_authenticity, risk_level)
 
         # Gate 5: Suspicious Domain & High Numeric Density
         if domain_info and domain_info.suspicious_hostname:
-            # If domain is verified authorized brand domain, ignore standard auth keywords
             is_verified_brand = bool(brand_result and brand_result.brand_detected and brand_result.brand_domain_match)
             if not is_verified_brand:
                 suspicious_indicators.extend(domain_info.risk_factors)
+                prev_a = weighted_authenticity
                 if domain_info.longest_numeric_sequence >= 6 or domain_info.numeric_ratio > 0.35:
                     weighted_authenticity = min(weighted_authenticity, 0.25)
                     if risk_level not in ["PHISHING", "HIGH_RISK"]:
                         risk_level = "HIGH_RISK"
+                    log_override("Gate 5 (Suspicious TLD/Numeric)", "High numeric sequence / suspicious hostname", prev_a, weighted_authenticity, risk_level)
                 elif domain_info.is_ip_address:
                     weighted_authenticity = min(weighted_authenticity, 0.45)
                     if risk_level == "SAFE":
                         risk_level = "SUSPICIOUS"
+                    log_override("Gate 5 (Raw IP Address)", "Raw IP address used in place of domain", prev_a, weighted_authenticity, risk_level)
                 elif domain_info.punycode_detected:
                     weighted_authenticity = min(weighted_authenticity, 0.45)
                     if risk_level == "SAFE":
                         risk_level = "SUSPICIOUS"
+                    log_override("Gate 5 (Punycode)", "Punycode internationalized homograph indicator", prev_a, weighted_authenticity, risk_level)
                 else:
                     weighted_authenticity = min(weighted_authenticity, 0.45)
                     if risk_level == "SAFE":
                         risk_level = "SUSPICIOUS"
+                    log_override("Gate 5 (Suspicious Hostname/TLD)", f"Risk factor: {', '.join(domain_info.risk_factors)}", prev_a, weighted_authenticity, risk_level)
 
         # Gate 6: Structural Deception Signals
         if hidden_count > 5:
             suspicious_indicators.append(f"Excessive hidden form inputs ({hidden_count} hidden fields)")
+            prev_a = weighted_authenticity
             weighted_authenticity = min(weighted_authenticity, 0.55)
             if risk_level == "SAFE":
                 risk_level = "SUSPICIOUS"
+            log_override("Gate 6 (Hidden Inputs)", f"{hidden_count} hidden input fields", prev_a, weighted_authenticity, risk_level)
 
         if iframe_count > 5:
             suspicious_indicators.append(f"Excessive embedded iframe elements ({iframe_count} iframes)")
+            prev_a = weighted_authenticity
             weighted_authenticity = min(weighted_authenticity, 0.60)
             if risk_level == "SAFE":
                 risk_level = "SUSPICIOUS"
+            log_override("Gate 6 (Iframes)", f"{iframe_count} embedded iframes", prev_a, weighted_authenticity, risk_level)
 
         # Gate 7: Legitimate Domain Verification
         if brand_result and brand_result.brand_detected and brand_result.brand_domain_match:
+            prev_a = weighted_authenticity
             weighted_authenticity = max(weighted_authenticity, 0.85)
             risk_level = "SAFE"
             suspicious_indicators = [ind for ind in suspicious_indicators if "Suspicious authentication keywords" not in ind]
+            if prev_a < 0.85:
+                log_override("Gate 7 (Verified Brand Match)", f"Official verified domain for {brand_result.brand_detected}", prev_a, weighted_authenticity, risk_level)
         elif domain_info and domain_info.domain_identity_score >= 0.90 and not (brand_result and brand_result.is_impersonation) and cross_domain_action_count == 0:
             if weighted_authenticity >= 0.70:
                 risk_level = "SAFE"
@@ -554,10 +628,25 @@ class AIAnalysisEngine:
         else:
             final_suspicious = []
 
-        self.logger.info(
-            f"AI analysis completed: authenticity={authenticity_score:.4f}, fake={fake_score:.4f}, "
-            f"ml_phish_prob={ml_phishing_prob:.4f}, risk_level={risk_level}, {len(top_factors)} top factors, {len(final_suspicious)} suspicious indicators"
-        )
+        # [10] FINAL RESULT
+        gate_summary = ", ".join(triggered_gates) if triggered_gates else "NONE"
+        gate_reason = ", ".join(triggered_reasons) if triggered_reasons else "NONE"
+        final_logs = [
+            f"[10] FINAL RESULT",
+            f"[RISK GATES]",
+            f"Which gate triggered: {gate_summary}",
+            f"Why it triggered: {gate_reason}",
+            f"",
+            f"[FINAL]",
+            f"Authentication score: {authenticity_score*100:.2f}%",
+            f"Fake score: {fake_score*100:.2f}%",
+            f"Risk level: {risk_level}",
+            f"Confidence: {self.calculate_confidence(data)}",
+            f"Reason: {top_factors[0] if top_factors else 'Analysis completed'}"
+        ]
+        for line in final_logs:
+            self.logger.info(line)
+            print(line, flush=True)
 
         return AnalysisScores(
             authenticity_score=authenticity_score,

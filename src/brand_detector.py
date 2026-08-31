@@ -52,8 +52,9 @@ BRAND_CATALOG: List[BrandProfile] = [
         name="Google",
         primary_domain="google.com",
         authorized_domains=[
-            "google.com", "google.pl", "google.co.uk", "google.de", "google.fr",
-            "google.it", "google.es", "google.ca", "google.com.au", "google.co.jp",
+            "google.com", "google.co.in", "google.pl", "google.co.uk", "google.de", "google.fr",
+            "google.it", "google.es", "google.ca", "google.com.au", "google.co.jp", "google.com.br",
+            "google.nl", "google.co.za", "google.co.nz", "google.com.mx", "google.ch",
             "youtube.com", "gmail.com", "gstatic.com", "googleapis.com", "googleusercontent.com"
         ],
         keywords=["google", "gmail", "google drive", "google docs", "google workspace", "youtube"],
@@ -64,36 +65,40 @@ BRAND_CATALOG: List[BrandProfile] = [
         authorized_domains=[
             "microsoft.com", "live.com", "office.com", "microsoftonline.com",
             "office365.com", "outlook.com", "bing.com", "azure.com", "msn.com",
-            "xbox.com", "onedrive.com", "sharepoint.com", "windows.com"
+            "xbox.com", "onedrive.com", "sharepoint.com", "windows.com",
+            "microsoft.in", "microsoftstore.com"
         ],
         keywords=["microsoft", "office 365", "office365", "outlook", "onedrive", "azure", "windows"],
     ),
     BrandProfile(
         name="Apple",
         primary_domain="apple.com",
-        authorized_domains=["apple.com", "icloud.com", "appleid.apple.com"],
+        authorized_domains=["apple.com", "icloud.com", "appleid.apple.com", "apple.co", "apple.in"],
         keywords=["apple", "icloud", "apple id", "app store"],
     ),
     BrandProfile(
         name="Amazon",
         primary_domain="amazon.com",
         authorized_domains=[
-            "amazon.com", "amazon.pl", "amazon.de", "amazon.co.uk", "amazon.fr",
-            "amazon.it", "amazon.es", "amazon.co.jp", "amazon.ca", "aws.amazon.com",
-            "primevideo.com", "media-amazon.com"
+            "amazon.com", "amazon.in", "amazon.pl", "amazon.de", "amazon.co.uk", "amazon.fr",
+            "amazon.it", "amazon.es", "amazon.co.jp", "amazon.ca", "amazon.com.au",
+            "amazon.com.br", "amazon.com.mx", "amazon.nl", "amazon.se", "amazon.ae",
+            "amazon.sa", "amazon.sg", "amazon.cn", "amazon.com.tr", "amazon.eg", "amazon.be",
+            "aws.amazon.com", "primevideo.com", "media-amazon.com", "ssl-images-amazon.com",
+            "amazon-adsystem.com"
         ],
         keywords=["amazon", "amazon prime", "aws", "prime video"],
     ),
     BrandProfile(
         name="PayPal",
         primary_domain="paypal.com",
-        authorized_domains=["paypal.com", "paypal.me", "paypal-objects.com"],
+        authorized_domains=["paypal.com", "paypal.me", "paypal-objects.com", "paypal.in"],
         keywords=["paypal", "paypal me"],
     ),
     BrandProfile(
         name="Netflix",
         primary_domain="netflix.com",
-        authorized_domains=["netflix.com", "netflix.net", "nflxext.com"],
+        authorized_domains=["netflix.com", "netflix.net", "nflxext.com", "nflximg.net"],
         keywords=["netflix"],
     ),
     BrandProfile(
@@ -104,6 +109,15 @@ BRAND_CATALOG: List[BrandProfile] = [
             "messenger.com", "fb.com"
         ],
         keywords=["facebook", "meta", "instagram", "whatsapp", "messenger"],
+    ),
+    BrandProfile(
+        name="Diners Club",
+        primary_domain="dinersclub.com",
+        authorized_domains=[
+            "dinersclub.com", "dinersclubus.com", "dinersclubinternational.com",
+            "dinersclub.co.uk", "dinersclub.de", "dinersclub.it", "dinersclub.es"
+        ],
+        keywords=["diners club", "dinersclub", "dinersclu", "diners-club"],
     ),
     BrandProfile(
         name="DHL",
@@ -201,6 +215,7 @@ class BrandDetector:
         """
         domain_info = DomainAnalyzer.analyze_domain(url)
         actual_reg_domain = domain_info.registrable_domain.lower()
+        actual_domain_name = domain_info.domain_name.lower()
         subdomain = domain_info.subdomain.lower()
         hostname = domain_info.hostname.lower()
 
@@ -210,7 +225,6 @@ class BrandDetector:
         # 1. Check Subdomain (highest signal for brand prepending e.g. allegro.oferta7678678564.pl)
         for brand in self.catalog:
             for kw in brand.keywords:
-                # Word boundary match in subdomain
                 clean_kw = kw.replace(" ", "")
                 pattern = rf"(^|[\.\-_]){re.escape(clean_kw)}([\.\-_]|$)"
                 if re.search(pattern, subdomain):
@@ -225,15 +239,28 @@ class BrandDetector:
             for brand in self.catalog:
                 for kw in brand.keywords:
                     clean_kw = kw.replace(" ", "")
-                    # Matches hyphenated hostnames like "microsoft-login"
-                    if f"{clean_kw}-" in hostname or f"-{clean_kw}" in hostname:
+                    # Matches hyphenated hostnames like "microsoft-login" or "dinersclu.bond"
+                    if f"{clean_kw}-" in hostname or f"-{clean_kw}" in hostname or f"{clean_kw}." in hostname:
                         detected_brand = brand
                         sources.append(f"hostname prefix/suffix ('{hostname}')")
                         break
                 if detected_brand:
                     break
 
-        # 3. Check Page Title
+        # 3. Check Domain Name typosquatting / brand substring token (e.g. dinersclu.bond)
+        if not detected_brand:
+            for brand in self.catalog:
+                brand_primary_sld = brand.primary_domain.split(".")[0].lower()
+                for kw in brand.keywords:
+                    clean_kw = kw.replace(" ", "").replace("-", "")
+                    if len(clean_kw) >= 5 and clean_kw in actual_domain_name:
+                        detected_brand = brand
+                        sources.append(f"domain token ('{actual_domain_name}')")
+                        break
+                if detected_brand:
+                    break
+
+        # 4. Check Page Title
         if not detected_brand and page_title:
             title_lower = page_title.lower()
             for brand in self.catalog:
@@ -245,7 +272,7 @@ class BrandDetector:
                 if detected_brand:
                     break
 
-        # 4. Check Headings / Content if still not found
+        # 5. Check Headings / Content if still not found
         if not detected_brand and headings:
             combined_headings = " ".join(headings).lower()
             for brand in self.catalog:
@@ -272,7 +299,17 @@ class BrandDetector:
             )
 
         # Validate whether actual_registrable_domain is authorized for the detected brand
+        # 1. Exact match in authorized_domains list
         is_authorized = actual_reg_domain in [d.lower() for d in detected_brand.authorized_domains]
+
+        # 2. Intelligent ccTLD/SLD matching:
+        # If the brand's primary domain SLD matches the actual domain name (e.g. amazon.in, google.co.in)
+        # under any legitimate public suffix NOT in SUSPICIOUS_TLDS, recognize it as an authorized brand domain.
+        if not is_authorized and domain_info and not domain_info.is_ip_address:
+            from src.domain_analyzer import SUSPICIOUS_TLDS
+            brand_primary_sld = detected_brand.primary_domain.split(".")[0].lower()
+            if actual_domain_name == brand_primary_sld and domain_info.public_suffix not in SUSPICIOUS_TLDS:
+                is_authorized = True
 
         if is_authorized:
             return BrandAnalysisResult(
@@ -294,7 +331,7 @@ class BrandDetector:
         ]
 
         # Determine severity
-        if "subdomain" in "".join(sources) or "hostname" in "".join(sources):
+        if "subdomain" in "".join(sources) or "hostname" in "".join(sources) or "domain token" in "".join(sources):
             severity = "CRITICAL"
         else:
             severity = "HIGH"

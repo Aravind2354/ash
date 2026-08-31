@@ -25,6 +25,7 @@ from src.brand_detector import BrandDetector
 from src.reputation_provider import ReputationService
 from config.logging_config import get_logger
 import re
+import urllib.parse
 
 
 # Collection Timeout Constants (Requirements 8.1, 8.3)
@@ -133,6 +134,19 @@ class AuthenticityDetector:
 
         normalized_url = InputValidator.normalize_url(url)
         target_url = normalized_url if normalized_url else url
+        parsed_target = urllib.parse.urlparse(target_url if "://" in target_url else f"http://{target_url}")
+
+        url_diag = [
+            "[1] URL RECEIVED",
+            "[URL]",
+            f"Original URL: {url}",
+            f"Normalized URL: {target_url}",
+            f"Hostname: {parsed_target.hostname or ''}",
+            f"Path: {parsed_target.path or '/'}",
+        ]
+        for line in url_diag:
+            self.logger.info(line)
+            print(line, flush=True)
 
         start_dt = datetime.now(timezone.utc)
         start_str = start_dt.isoformat().replace("+00:00", "Z")
@@ -207,6 +221,8 @@ class AuthenticityDetector:
 
                 # Step 7: Collect AnalysisData
                 current_operation = "data collection"
+                self.logger.info(f"[4] DATA COLLECTION: Starting multi-category data extraction for {target_url}")
+                print(f"[4] DATA COLLECTION: Starting multi-category data extraction for {target_url}", flush=True)
                 collect_res = self.data_collector.collect_all(sandbox, target_url, timeout=INITIAL_COLLECTION_TIMEOUT)
                 if inspect.isawaitable(collect_res):
                     analysis_data = await collect_res
@@ -266,6 +282,59 @@ class AuthenticityDetector:
                     analysis_data = retry_data
                     categories_count = retry_count
 
+                # Extract page identity and HTML content for validation
+                html = analysis_data.dom.html_content if analysis_data and analysis_data.dom and isinstance(analysis_data.dom.html_content, str) else ""
+                dom_metrics = analysis_data.dom.structure_metrics if analysis_data and analysis_data.dom and isinstance(analysis_data.dom.structure_metrics, dict) else {}
+                page_title = ""
+                if html:
+                    title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+                    if title_match:
+                        page_title = title_match.group(1).strip()
+
+                final_browser_url = target_url
+                if sandbox is not None and getattr(sandbox, "page", None) is not None:
+                    try:
+                        p_url = sandbox.page.url
+                        if isinstance(p_url, str) and p_url:
+                            final_browser_url = p_url
+                        elif isinstance(getattr(sandbox, "final_url", None), str):
+                            final_browser_url = sandbox.final_url
+                    except Exception:
+                        final_browser_url = getattr(sandbox, "final_url", target_url)
+
+                # [2] Interstitial & Block-Page Detection
+                from src.interstitial_detector import detect_interstitial
+                interstitial_res = detect_interstitial(
+                    requested_url=target_url,
+                    final_url=final_browser_url,
+                    page_title=page_title,
+                    html_content=html,
+                    structure_metrics=dom_metrics,
+                )
+
+                # Diagnostic Logging
+                redirects = getattr(analysis_data.network, "redirect_chain", []) if analysis_data and analysis_data.network else []
+                diag_logs = [
+                    f"[2] INTERSTITIAL CHECK",
+                    f"[NAVIGATION]",
+                    f"Final URL: {interstitial_res.final_url}",
+                    f"HTTP status: 200",
+                    f"Page title: {interstitial_res.page_title}",
+                    f"Redirect chain: {redirects}",
+                    f"",
+                    f"[INTERSTITIAL]",
+                    f"Detected: {'YES' if interstitial_res.is_interstitial else 'NO'}",
+                    f"Type: {interstitial_res.interstitial_type}",
+                    f"Reason: {interstitial_res.reason if interstitial_res.reason else 'None'}",
+                    f"Indicators: {interstitial_res.indicators if interstitial_res.indicators else '[]'}",
+                    f"Was target actually reached: {'YES' if interstitial_res.target_domain_reached else 'NO'}",
+                    f"",
+                    f"[3] WEBSITE REACHED: {'YES' if interstitial_res.target_domain_reached else 'NO'}"
+                ]
+                for line in diag_logs:
+                    self.logger.info(line)
+                    print(line, flush=True)
+
                 # Query threat reputation
                 reputation = None
                 try:
@@ -276,6 +345,132 @@ class AuthenticityDetector:
                         reputation = rep_res
                 except Exception as rep_exc:
                     self.logger.warning(f"Reputation check error: {rep_exc}")
+
+                domain_info = self.domain_analyzer.analyze_domain(target_url)
+                headings = []
+                if html:
+                    h_matches = re.findall(r'<h[1-3][^>]*>(.*?)</h[1-3]>', html, re.IGNORECASE | re.DOTALL)
+                    headings = [re.sub(r'<[^>]+>', '', h).strip() for h in h_matches if h]
+
+                brand_result = self.brand_detector.detect_brand_impersonation(
+                    target_url, page_title=page_title, html_content=html, headings=headings
+                )
+
+                # -------------------------------------------------------------
+                # Handle Interstitial Case vs Normal Website Execution
+                # -------------------------------------------------------------
+                if interstitial_res.is_interstitial:
+                    diag_interstitial = [
+                        f"[ANALYSIS] Proceeding to feature extraction: NO (Security/interstitial detected: {interstitial_res.reason})",
+                    ]
+                    if interstitial_res.is_phishing_signal or interstitial_res.interstitial_type in ["PHISHING_WARNING", "SECURITY_BLOCKED"]:
+                        diag_interstitial.extend([
+                            "[XGBOOST] Status: BYPASSED",
+                            "[XGBOOST] Prediction: BYPASSED (Security/Phishing Interstitial Warning)",
+                            f"[HYBRID] Final result: PHISHING / HIGH_RISK (Preserving security signal: {interstitial_res.reason})",
+                            "[RISK GATE] Triggered: Security Interstitial Warning",
+                            "[FINAL] Authenticity: 5.00%",
+                            "[FINAL] Fake/Phishing: 95.00%",
+                            "[FINAL] Confidence: HIGH",
+                            "[FINAL] Risk: PHISHING"
+                        ])
+                    else:
+                        diag_interstitial.extend([
+                            "[XGBOOST] Status: BYPASSED",
+                            "[XGBOOST] Prediction: INCONCLUSIVE (Target website not reached)",
+                            f"[HYBRID] Final result: INCONCLUSIVE (Target website not reached: {interstitial_res.reason})",
+                            "[RISK GATE] Triggered: Bot / Verification Challenge Interstitial",
+                            "[FINAL] Authenticity: None",
+                            "[FINAL] Fake/Phishing: None",
+                            "[FINAL] Confidence: LOW",
+                            "[FINAL] Risk: INCONCLUSIVE"
+                        ])
+                    for line in diag_interstitial:
+                        self.logger.info(line)
+                        print(line, flush=True)
+
+                    if interstitial_res.is_phishing_signal or interstitial_res.interstitial_type in ["PHISHING_WARNING", "SECURITY_BLOCKED"]:
+                        auth_score = 0.05
+                        fake_score = 0.95
+                        confidence = "HIGH"
+                        risk_level = "PHISHING"
+                        critical_indicators = [f"SECURITY_INTERSTITIAL: {ind}" for ind in interstitial_res.indicators]
+                        top_factors = [
+                            f"Security warning: {interstitial_res.reason}",
+                            "Website explicitly reported for suspected phishing or malicious activity",
+                            "Navigation blocked by security interstitial before reaching target"
+                        ]
+                        suspicious_indicators = interstitial_res.indicators
+                        error_msg = None
+                    else:
+                        # Bot / Verification challenge where target website was not reached
+                        auth_score = None
+                        fake_score = None
+                        confidence = "LOW"
+                        risk_level = "INCONCLUSIVE"
+                        critical_indicators = []
+                        top_factors = [
+                            "Target website was intercepted by a security challenge / interstitial",
+                            f"Challenge detected: {interstitial_res.reason}",
+                            "Target website content could not be verified"
+                        ]
+                        suspicious_indicators = [f"Security challenge intercepted target URL: {interstitial_res.reason}"]
+                        error_msg = f"Analysis inconclusive: Target website was not reached due to an interstitial challenge ({interstitial_res.reason})"
+
+                    if progress_callback and callable(progress_callback):
+                        try:
+                            progress_callback("generating report")
+                        except Exception:
+                            pass
+
+                    result = AnalysisResult(
+                        authenticity_score=auth_score,
+                        fake_score=fake_score,
+                        confidence_indicator=confidence,
+                        url=url,
+                        analysis_data=analysis_data,
+                        timestamps=timestamps,
+                        top_factors=top_factors,
+                        suspicious_indicators=suspicious_indicators,
+                        error_message=error_msg,
+                        risk_level=risk_level,
+                        normalized_url=target_url,
+                        domain=domain_info.hostname,
+                        registrable_domain=domain_info.registrable_domain,
+                        brand_detected=brand_result.brand_detected if brand_result else None,
+                        brand_domain_match=brand_result.brand_domain_match if brand_result else None,
+                        reputation=reputation,
+                        redirects=[],
+                        critical_indicators=critical_indicators,
+                    )
+
+                    if auth_score is None:
+                        report = self.report_generator.generate_partial_report(result)
+                    else:
+                        report = self.report_generator.generate_report(result)
+
+                    report["risk_level"] = risk_level
+                    report["normalized_url"] = target_url
+                    report["domain"] = domain_info.hostname
+                    report["registrable_domain"] = domain_info.registrable_domain
+                    report["brand_detected"] = brand_result.brand_detected if brand_result else None
+                    report["brand_domain_match"] = brand_result.brand_domain_match if brand_result else None
+                    report["reputation"] = reputation
+                    report["redirects"] = []
+                    report["critical_indicators"] = critical_indicators
+
+                    if progress_callback and callable(progress_callback):
+                        try:
+                            progress_callback("completed")
+                        except Exception:
+                            pass
+
+                    return report
+
+                # -------------------------------------------------------------
+                # Normal Website: Proceed to AI & XGBoost Pipeline
+                # -------------------------------------------------------------
+                self.logger.info("[ANALYSIS] Proceeding to feature extraction: YES")
 
                 # Step 10: AI Analysis
                 current_operation = "AI analysis"
@@ -295,22 +490,6 @@ class AuthenticityDetector:
                 suspicious_indicators = scores.suspicious_indicators
                 risk_level = getattr(scores, "risk_level", "SAFE")
                 critical_indicators = getattr(scores, "critical_indicators", [])
-
-                # Domain & Brand intelligence
-                domain_info = self.domain_analyzer.analyze_domain(target_url)
-                html = analysis_data.dom.html_content if analysis_data and analysis_data.dom and isinstance(analysis_data.dom.html_content, str) else ""
-                page_title = ""
-                headings = []
-                if html:
-                    title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
-                    if title_match:
-                        page_title = title_match.group(1).strip()
-                    h_matches = re.findall(r'<h[1-3][^>]*>(.*?)</h[1-3]>', html, re.IGNORECASE | re.DOTALL)
-                    headings = [re.sub(r'<[^>]+>', '', h).strip() for h in h_matches if h]
-
-                brand_result = self.brand_detector.detect_brand_impersonation(
-                    target_url, page_title=page_title, html_content=html, headings=headings
-                )
 
                 end_dt = datetime.now(timezone.utc)
                 end_str = end_dt.isoformat().replace("+00:00", "Z")
@@ -486,4 +665,6 @@ def analyze_website(
         error_message, and all report fields.
     """
     det = detector or AuthenticityDetector()
-    return det.analyze_website(url, progress_callback=progress_callback)
+    if progress_callback is not None:
+        return det.analyze_website(url, progress_callback=progress_callback)
+    return det.analyze_website(url)

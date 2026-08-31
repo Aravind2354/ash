@@ -212,7 +212,9 @@ async def run_analysis_task(task_id: str, url: str):
         result = await detector.analyze_website_async(url, progress_callback=on_progress)
 
         if isinstance(result, dict):
-            if result.get("authenticity_score") is not None and not result.get("error_message"):
+            if result.get("risk_level") == "INCONCLUSIVE":
+                result["status"] = "inconclusive"
+            elif result.get("authenticity_score") is not None and not result.get("error_message"):
                 result["status"] = "success"
             elif result.get("authenticity_score") is not None:
                 result["status"] = "partial"
@@ -224,10 +226,20 @@ async def run_analysis_task(task_id: str, url: str):
             task_manager.fail_task(task_id, result.get("error_message"))
             # Keep result dictionary available on task for inspection
             task_manager.update_task(task_id, result=result)
-            logger.warning(f"[Task {task_id}] Analysis finished with failure status: {result.get('error_message')}")
+            api_resp_log = f"[11] API RESPONSE: task_id={task_id}, status=failed, error={result.get('error_message')}"
+            logger.warning(api_resp_log)
+            print(api_resp_log, flush=True)
         else:
             task_manager.complete_task(task_id, result)
-            logger.info(f"[Task {task_id}] Analysis completed successfully for {url}")
+            api_resp_log = (
+                f"[11] API RESPONSE: task_id={task_id}, status=completed, "
+                f"authenticity_score={result.get('authenticity_score') if isinstance(result, dict) else None}, "
+                f"fake_score={result.get('fake_score') if isinstance(result, dict) else None}, "
+                f"risk_level={result.get('risk_level') if isinstance(result, dict) else None}, "
+                f"confidence={result.get('confidence_indicator') if isinstance(result, dict) else None}"
+            )
+            logger.info(api_resp_log)
+            print(api_resp_log, flush=True)
 
     except Exception as e:
         logger.error(f"[Task {task_id}] Unhandled error during analysis for {url}: {e}", exc_info=True)

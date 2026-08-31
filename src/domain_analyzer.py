@@ -62,6 +62,7 @@ SUSPICIOUS_TLDS: Set[str] = {
     "xyz", "top", "tk", "ml", "ga", "cf", "gq", "buzz", "cam", "sbs",
     "icu", "cyou", "monster", "work", "loan", "click", "fit", "rest",
     "surf", "racing", "date", "faith", "download", "stream", "bid",
+    "bond", "vip", "cfd", "bar", "beauty", "hair", "skin", "quest", "live",
 }
 
 
@@ -167,10 +168,21 @@ class DomainAnalyzer:
             DomainIdentity containing extracted fields, scores, and risk factors.
         """
         raw_url = url.strip()
-        parsed = urlparse(raw_url if "://" in raw_url else f"http://{raw_url}")
+        try:
+            parsed = urlparse(raw_url if "://" in raw_url else f"http://{raw_url}")
+            hostname = (parsed.hostname or "").lower().strip()
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+        except Exception:
+            clean_netloc = raw_url.split("://")[-1].split("/")[0]
+            hostname = clean_netloc.split(":")[0].lower().strip()
+            port = None
         
-        hostname = (parsed.hostname or "").lower().strip()
-        port = parsed.port
+        if not hostname:
+            clean_netloc = raw_url.split("://")[-1].split("/")[0]
+            hostname = clean_netloc.split(":")[0].lower().strip()
 
         # Check IP address
         is_ip = False

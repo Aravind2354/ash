@@ -330,7 +330,12 @@ function showResult(result) {
     const riskLevel = (result.risk_level || '').toUpperCase();
 
     if (alertSection && alertIcon && alertTitle && alertDescription) {
-        if (result.status === 'failed' || (result.authenticity_score == null && result.fake_score == null)) {
+        if (riskLevel === 'INCONCLUSIVE' || result.status === 'inconclusive') {
+            alertSection.className = 'security-alert-card inconclusive';
+            alertIcon.textContent = '❓';
+            alertTitle.textContent = 'ANALYSIS INCONCLUSIVE (TARGET NOT REACHED)';
+            alertDescription.textContent = 'The target website could not be reached because automated navigation was intercepted by an anti-bot or verification challenge. Do not classify this site as SAFE or PHISHING.';
+        } else if (result.status === 'failed' || (result.authenticity_score == null && result.fake_score == null)) {
             alertSection.className = 'security-alert-card failed';
             alertIcon.textContent = '❌';
             alertTitle.textContent = 'ANALYSIS FAILED / INCONCLUSIVE';
