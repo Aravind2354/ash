@@ -28,12 +28,10 @@ tests/
 logs/
 *.log
 
-# Datasets and model artifacts
+# Datasets and large training artifacts (keep runtime models in image)
 datasets/
-models/
 *.pkl
 *.joblib
-*.model
 
 # IDE metadata
 .vscode/

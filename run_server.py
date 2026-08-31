@@ -2,6 +2,8 @@ import asyncio
 import sys
 import uvicorn
 
+# Playwright requires a Windows event loop that supports subprocesses.
+# On Linux, use the default event loop policy.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(
         asyncio.WindowsProactorEventLoopPolicy()

@@ -58,5 +58,5 @@
       0.029948294162750244
     ]
   ],
-  "model_path": "C:\\Users\\honey\\fakewebsite\\models\\xgboost_phishing_model.json"
+  "model_path": "models/xgboost_phishing_model.json"
 }

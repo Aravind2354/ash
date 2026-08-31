@@ -61,6 +61,8 @@ class AuthenticityDetector:
         Validates: Requirements 5.3, 5.4, 5.5, Property 17
         """
         try:
+            # Playwright requires a Windows event loop that supports subprocesses.
+            # On Linux, use the default event loop policy.
             if sys.platform == "win32":
                 asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             loop = asyncio.get_event_loop()
@@ -69,6 +71,8 @@ class AuthenticityDetector:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     def _thread_worker():
+                        # Playwright requires a Windows event loop that supports subprocesses.
+                        # On Linux, use the default event loop policy.
                         if sys.platform == "win32":
                             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
                         return asyncio.run(self.analyze_website_async(url, progress_callback=progress_callback))
@@ -77,6 +81,8 @@ class AuthenticityDetector:
             else:
                 return loop.run_until_complete(self.analyze_website_async(url, progress_callback=progress_callback))
         except RuntimeError:
+            # Playwright requires a Windows event loop that supports subprocesses.
+            # On Linux, use the default event loop policy.
             if sys.platform == "win32":
                 asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             return asyncio.run(self.analyze_website_async(url, progress_callback=progress_callback))
