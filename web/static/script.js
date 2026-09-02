@@ -109,6 +109,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initInputControls() {
     if (urlInput) {
+        // Explicitly clear input on page load to prevent browser autofill
+        urlInput.value = '';
+        
         urlInput.addEventListener('input', () => {
             hideFieldError();
             if (clearBtn) {
@@ -252,6 +255,18 @@ function validateUrlInput(rawUrl) {
         if (!parsed.hostname || parsed.hostname.indexOf('.') === -1 && parsed.hostname !== 'localhost') {
             return { isValid: false, message: 'Please enter a valid domain name (e.g., https://example.com)' };
         }
+        
+        // Reject dashboard/platform URLs that shouldn't be analyzed
+        if (parsed.hostname.includes('dashboard.render.com') || 
+            parsed.hostname.includes('render.com') && parsed.pathname.includes('/web/')) {
+            return { isValid: false, message: 'Dashboard and platform URLs cannot be analyzed. Please enter a target website URL.' };
+        }
+        
+        // Reject URLs starting with query parameters (autofill artifacts)
+        if (trimmed.startsWith('?') || trimmed.startsWith('&')) {
+            return { isValid: false, message: 'Invalid URL format. Please enter a complete URL starting with http:// or https://' };
+        }
+        
     } catch (err) {
         return { isValid: false, message: 'Invalid URL structure' };
     }
