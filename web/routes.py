@@ -31,13 +31,20 @@ async def analyze_website(request: AnalyzeRequest):
         Task ID and status
 
     Raises:
-        HTTPException: If URL validation fails
+        HTTPException: If URL validation fails or queue is full
     """
     # Validate URL using the authoritative InputValidator
     is_valid, error_message = input_validator.validate_url(request.url)
 
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_message)
+
+    # Check queue capacity for memory optimization
+    if not await task_manager.can_accept_new_task():
+        raise HTTPException(
+            status_code=503, 
+            detail="Server is busy. Maximum queue capacity reached. Please try again later."
+        )
 
     # Create background task
     task = task_manager.create_task(request.url)

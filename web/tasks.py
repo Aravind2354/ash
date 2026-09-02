@@ -34,18 +34,26 @@ class Task:
 
 
 class TaskManager:
-    """Thread-safe manager for background analysis tasks."""
+    """Thread-safe manager for background analysis tasks with concurrency control."""
 
-    def __init__(self, max_age_minutes: int = 10):
+    def __init__(self, max_age_minutes: int = 10, max_concurrent_analyses: int = 1, max_queue_size: int = 10):
         """Initialize task manager.
 
         Args:
             max_age_minutes: Maximum age for tasks before cleanup
+            max_concurrent_analyses: Maximum number of concurrent analyses (default: 1 for memory optimization)
+            max_queue_size: Maximum number of pending tasks in queue (default: 10)
         """
         self.tasks: Dict[str, Task] = {}
         self.max_age = timedelta(minutes=max_age_minutes)
         self._cleanup_task: Optional[asyncio.Task] = None
         self._lock = threading.Lock()
+        
+        # Concurrency control for memory optimization
+        self._analysis_semaphore = asyncio.Semaphore(max_concurrent_analyses)
+        self._max_concurrent_analyses = max_concurrent_analyses
+        self._max_queue_size = max_queue_size
+        self._pending_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
 
     def create_task(self, url: str) -> Task:
         """Create a new analysis task.
@@ -62,6 +70,48 @@ class TaskManager:
             self.tasks[task_id] = task
         logger.info(f"[Task {task_id}] Created task for URL: {url}")
         return task
+
+    async def can_accept_new_task(self) -> bool:
+        """Check if the system can accept a new analysis task.
+
+        Returns:
+            True if queue has capacity and sufficient memory, False otherwise
+        """
+        # Check queue capacity
+        try:
+            self._pending_queue.put_nowait(None)
+            self._pending_queue.get_nowait()  # Remove the dummy item
+        except asyncio.QueueFull:
+            logger.warning("Queue is full, rejecting new task")
+            return False
+        
+        # Check available memory (basic check)
+        try:
+            import psutil
+            available_mb = psutil.virtual_memory().available / 1024 / 1024
+            # Require at least 200 MB available for a new analysis
+            if available_mb < 200:
+                logger.warning(f"Insufficient memory ({available_mb:.0f} MB available), rejecting new task")
+                return False
+        except ImportError:
+            # psutil not available, skip memory check
+            pass
+        except Exception as e:
+            logger.warning(f"Memory check failed: {e}")
+        
+        return True
+
+    async def acquire_analysis_slot(self):
+        """Acquire a slot for analysis (concurrency control).
+
+        This method will block until a slot is available, implementing
+        the queuing behavior for memory optimization.
+        """
+        await self._analysis_semaphore.acquire()
+
+    def release_analysis_slot(self):
+        """Release an analysis slot after completion."""
+        self._analysis_semaphore.release()
 
     def get_task(self, task_id: str) -> Optional[Task]:
         """Get a task by ID.
@@ -192,6 +242,9 @@ async def run_analysis_task(task_id: str, url: str):
         task_id: Unique task identifier
         url: Validated URL to analyze
     """
+    # Acquire analysis slot for concurrency control (memory optimization)
+    await task_manager.acquire_analysis_slot()
+    
     logger.info(f"[Task {task_id}] Background analysis started for {url}")
     task_manager.update_task(task_id, status="running", progress="starting")
 
@@ -258,6 +311,9 @@ async def run_analysis_task(task_id: str, url: str):
         logger.error(f"[Task {task_id}] Unhandled error during analysis for {url}: {e}", exc_info=True)
         task_manager.fail_task(task_id, str(e))
     finally:
+        # Release analysis slot for concurrency control
+        task_manager.release_analysis_slot()
+        
         if sandbox_manager:
             try:
                 await sandbox_manager.terminate_sandbox(force=True)

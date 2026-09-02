@@ -134,19 +134,36 @@ class Sandbox:
         if self.page is not None:
             try:
                 await asyncio.wait_for(self.page.close(), timeout=2.0)
+            except asyncio.TimeoutError:
+                self.logger.warning(f"Page close timeout, forcing close")
+                try:
+                    # Force close the page even if timeout
+                    await asyncio.shield(self.page.close())
+                except Exception:
+                    pass
             except Exception as e:
                 self.logger.warning(f"Error closing page in sandbox context: {e}")
-            self.page = None
+            finally:
+                self.page = None
             self.logger.info("Closed page in sandbox context")
 
     async def close(self) -> None:
-        """Close the browser context."""
+        """Close the browser context with enhanced cleanup."""
         await self.close_page()
         if self.context:
             try:
                 await asyncio.wait_for(self.context.close(), timeout=3.0)
+            except asyncio.TimeoutError:
+                self.logger.warning(f"Context close timeout, forcing close")
+                try:
+                    # Force close the context even if timeout
+                    await asyncio.shield(self.context.close())
+                except Exception:
+                    pass
             except Exception as e:
                 self.logger.warning(f"Error closing context: {e}")
+            finally:
+                self.context = None
             self.logger.info("Closed sandbox context")
 
     async def load_url(self, url: str, timeout: int = 30) -> bool:
@@ -1083,6 +1100,10 @@ class SandboxManager:
                             '--no-default-browser-check',
                             '--metrics-recording-only',
                             '--enable-automation',
+                            # Memory optimization flags
+                            '--disable-software-rasterizer',
+                            '--disable-features=VizDisplayCompositor',
+                            '--max-old-space-size=256',
                         ],
                         ignore_https_errors=True,
                         java_script_enabled=True,
@@ -1241,7 +1262,7 @@ class SandboxManager:
         self._is_initialized = False
 
     async def _force_terminate(self) -> None:
-        """Force terminate all sandbox resources immediately.
+        """Force terminate all sandbox resources immediately with enhanced cleanup.
 
         Logs forced termination event as required by Requirement 1.6.
         Handles asyncio.CancelledError to ensure cleanup completes.
@@ -1260,7 +1281,17 @@ class SandboxManager:
             b = self.browser
             self.browser = None
             try:
-                await asyncio.shield(b.close())
+                # Close browser with multiple attempts for reliability
+                for attempt in range(3):
+                    try:
+                        await asyncio.wait_for(asyncio.shield(b.close()), timeout=2.0)
+                        break
+                    except asyncio.TimeoutError:
+                        if attempt == 2:
+                            self.logger.warning("Browser close timeout after 3 attempts")
+                    except Exception as e:
+                        if attempt == 2:
+                            self.logger.warning(f"Error closing browser during force termination: {e}")
             except Exception as e:
                 self.logger.warning(f"Error closing browser during force termination: {e}")
 
@@ -1274,7 +1305,7 @@ class SandboxManager:
             finally:
                 # Allow Playwright transport background tasks to settle on the event loop
                 try:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
                 except Exception:
                     pass
 

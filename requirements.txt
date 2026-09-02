@@ -21,6 +21,9 @@ jsonschema>=4.20.0
 # Additional utilities
 requests>=2.31.0
 
+# System monitoring for memory optimization
+psutil>=5.9.0
+
 # Docker SDK for container management
 docker>=7.0.0
 
